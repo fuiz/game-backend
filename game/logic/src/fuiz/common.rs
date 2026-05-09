@@ -5,7 +5,7 @@
 //! code duplication and providing consistent behavior.
 
 use std::{
-    collections::{HashMap, HashSet, hash_map::Keys},
+    collections::{HashMap, hash_map::Keys},
     iter::Copied,
     time::Duration,
 };
@@ -96,16 +96,57 @@ pub trait AnswerHandler<AnswerType> {
     /// Get mutable access to user answers with timestamps
     fn user_answers_mut(&mut self) -> &mut HashMap<Id, (AnswerType, SystemTime)>;
 
+    /// Number of distinct *live* players who have answered.
+    ///
+    /// Maintained incrementally by [`Self::record_answer`],
+    /// [`Self::mark_watcher_left`], and [`Self::mark_watcher_returned`] so
+    /// that "all answered" / "answered count" checks are O(1) instead of
+    /// scanning the watcher set per answer.
+    fn live_answered_count(&self) -> usize;
+
+    /// Mutable handle to the live-answered counter. Implementors expose the
+    /// same field that [`Self::live_answered_count`] reads.
+    fn live_answered_count_mut(&mut self) -> &mut usize;
+
     /// Get the IDs of players who have answered
     fn ids_of_who_answered(&self) -> Copied<Keys<'_, Id, (AnswerType, SystemTime)>> {
         self.user_answers().keys().copied()
     }
 
-    /// Records a player's answer with the current timestamp
+    /// Records a player's answer with the current timestamp.
+    ///
+    /// Updates the live-answered counter when this is the first answer from
+    /// `id` (so a player overwriting their own answer doesn't double-count).
     fn record_answer(&mut self, id: Id, answer: AnswerType) {
         let transformed_answer = self.transform_answer(answer);
-        self.user_answers_mut()
-            .insert(id, (transformed_answer, SystemTime::now()));
+        let was_new = self
+            .user_answers_mut()
+            .insert(id, (transformed_answer, SystemTime::now()))
+            .is_none();
+        if was_new {
+            *self.live_answered_count_mut() += 1;
+        }
+    }
+
+    /// Notify the slide that a watcher has gone offline.
+    ///
+    /// If the watcher had already answered, decrement the live-answered count
+    /// (their answer stays in `user_answers` so it still scores at slide end).
+    fn mark_watcher_left(&mut self, id: Id) {
+        if self.user_answers().contains_key(&id) {
+            let c = self.live_answered_count_mut();
+            *c = c.saturating_sub(1);
+        }
+    }
+
+    /// Notify the slide that a watcher has reconnected.
+    ///
+    /// If they had previously answered (and were de-counted by
+    /// [`Self::mark_watcher_left`]), put them back in the live-answered tally.
+    fn mark_watcher_returned(&mut self, id: Id) {
+        if self.user_answers().contains_key(&id) {
+            *self.live_answered_count_mut() += 1;
+        }
     }
 
     /// Transforms the player's answer before recording it
@@ -206,34 +247,20 @@ pub(crate) fn add_scores_to_leaderboard<
     );
 }
 
-/// Helper function to check if all players have answered
-pub fn all_players_answered<F: TunnelFinder, AnswerType, A: AnswerHandler<AnswerType>>(
-    slide: &A,
-    watchers: &Watchers,
-    tunnel_finder: &F,
-) -> bool {
-    let left_set: HashSet<_> = watchers
-        .specific_vec(ValueKind::Player, tunnel_finder)
-        .iter()
-        .map(|(w, _, _)| w.to_owned())
-        .collect();
-    let right_set: HashSet<_> = slide.ids_of_who_answered().collect();
-    left_set.is_subset(&right_set)
+/// True when every currently-live player has answered.
+///
+/// O(1): reads counters maintained by the slide and the watcher map. Relies
+/// on `reverse_mapping[Player]` reflecting only live watchers (see
+/// [`Watchers::watcher_left`](crate::watcher::Watchers::watcher_left) and
+/// [`Watchers::watcher_returned`](crate::watcher::Watchers::watcher_returned)).
+pub fn all_players_answered<AnswerType, A: AnswerHandler<AnswerType>>(slide: &A, watchers: &Watchers) -> bool {
+    let live_players = watchers.specific_count(ValueKind::Player);
+    live_players > 0 && slide.live_answered_count() >= live_players
 }
 
-/// Helper function to get answered player count
-pub fn get_answered_count<F: TunnelFinder, AnswerType, A: AnswerHandler<AnswerType>>(
-    slide: &A,
-    watchers: &Watchers,
-    tunnel_finder: &F,
-) -> usize {
-    let left_set: HashSet<_> = watchers
-        .specific_vec(ValueKind::Player, tunnel_finder)
-        .iter()
-        .map(|(w, _, _)| w.to_owned())
-        .collect();
-    let right_set: HashSet<_> = slide.ids_of_who_answered().collect();
-    left_set.intersection(&right_set).count()
+/// Number of live players who have answered. O(1).
+pub fn get_answered_count<AnswerType, A: AnswerHandler<AnswerType>>(slide: &A) -> usize {
+    slide.live_answered_count()
 }
 
 /// Common interface for all question types to handle incoming messages

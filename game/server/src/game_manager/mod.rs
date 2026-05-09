@@ -137,8 +137,10 @@ impl GameManager {
         })
     }
 
-    pub fn remove_watcher_session(&self, watcher_id: Id) {
-        fuiz::watcher::Watchers::remove_watcher_session(watcher_id, |id| self.tunnel_finder(id));
+    pub fn watcher_left(&self, game_id: GameId, watcher_id: Id) -> Result<(), GameVanish> {
+        self.with_game_mut(game_id, |game| {
+            game.watcher_left(watcher_id);
+        })
     }
 
     pub fn exists(&self, game_id: GameId) -> Result<(), GameVanish> {

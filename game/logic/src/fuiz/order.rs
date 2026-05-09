@@ -101,6 +101,9 @@ pub struct State {
     shuffled_answers: Vec<String>,
     /// Player arrangements with submission timestamps
     user_answers: HashMap<Id, (Vec<String>, SystemTime)>,
+    /// Distinct live players who have answered. Maintained incrementally.
+    #[serde(default)]
+    live_answered_count: usize,
     /// Time when the ordering interface was first displayed
     answer_start: Option<SystemTime>,
     /// Current phase of the slide presentation
@@ -121,6 +124,7 @@ impl SlideConfig {
             config: self.clone(),
             shuffled_answers: Vec::new(),
             user_answers: HashMap::new(),
+            live_answered_count: 0,
             answer_start: None,
             state: SlideState::Unstarted,
         }
@@ -268,6 +272,14 @@ impl AnswerHandler<Vec<String>> for State {
 
     fn user_answers_mut(&mut self) -> &mut HashMap<Id, (Vec<String>, SystemTime)> {
         &mut self.user_answers
+    }
+
+    fn live_answered_count(&self) -> usize {
+        self.live_answered_count
+    }
+
+    fn live_answered_count_mut(&mut self) -> &mut usize {
+        &mut self.live_answered_count
     }
 
     fn is_correct_answer(&self, answer: &Vec<String>) -> bool {
@@ -616,12 +628,12 @@ impl QuestionReceiveMessage for State {
     ) {
         if let IncomingPlayerMessage::StringArrayAnswer(v) = message {
             self.record_answer(watcher_id, v);
-            if all_players_answered(self, watchers, &tunnel_finder) {
+            if all_players_answered(self, watchers) {
                 self.send_answers_results(watchers, &tunnel_finder);
             } else {
                 watchers.announce_specific(
                     ValueKind::Host,
-                    &UpdateMessage::AnswersCount(get_answered_count(self, watchers, &tunnel_finder)).into(),
+                    &UpdateMessage::AnswersCount(get_answered_count(self)).into(),
                     &tunnel_finder,
                 );
             }

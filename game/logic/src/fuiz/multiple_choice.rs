@@ -94,6 +94,11 @@ pub struct State {
     // Runtime State
     /// Stores player answers along with the timestamp when they were submitted
     user_answers: HashMap<Id, (Vec<usize>, SystemTime)>,
+    /// Distinct live players who have answered. Maintained incrementally by
+    /// [`AnswerHandler::record_answer`], [`AnswerHandler::mark_watcher_left`],
+    /// and [`AnswerHandler::mark_watcher_returned`].
+    #[serde(default)]
+    live_answered_count: usize,
     /// The time when answer options were first displayed to players
     answer_start: Option<SystemTime>,
     /// Current phase of the slide presentation
@@ -113,6 +118,7 @@ impl SlideConfig {
         State {
             config: self.clone(),
             user_answers: HashMap::new(),
+            live_answered_count: 0,
             answer_start: None,
             state: SlideState::Unstarted,
         }
@@ -303,6 +309,14 @@ impl AnswerHandler<Vec<usize>> for State {
 
     fn user_answers_mut(&mut self) -> &mut HashMap<Id, (Vec<usize>, SystemTime)> {
         &mut self.user_answers
+    }
+
+    fn live_answered_count(&self) -> usize {
+        self.live_answered_count
+    }
+
+    fn live_answered_count_mut(&mut self) -> &mut usize {
+        &mut self.live_answered_count
     }
 
     fn is_correct_answer(&self, answer: &Vec<usize>) -> bool {
@@ -654,7 +668,7 @@ impl State {
         watcher_id: Id,
         watcher_kind: ValueKind,
         team_manager: Option<&TeamManager<crate::names::NameStyle>>,
-        watchers: &Watchers,
+        _watchers: &Watchers,
         tunnel_finder: F,
         index: usize,
         count: usize,
@@ -680,7 +694,7 @@ impl State {
                     team_manager.map_or(0, |tm| tm.alive_team_index(watcher_id, &tunnel_finder)),
                     team_manager.is_some(),
                 ),
-                answered_count: get_answered_count(self, watchers, &tunnel_finder),
+                answered_count: get_answered_count(self),
                 answer_mode: self.config.answer_mode,
             },
             SlideState::AnswersResults => {
@@ -822,12 +836,12 @@ impl QuestionReceiveMessage for State {
 
         if let Some(answer) = answer {
             self.record_answer(watcher_id, answer);
-            if all_players_answered(self, watchers, &tunnel_finder) {
+            if all_players_answered(self, watchers) {
                 self.send_answers_results(watchers, &tunnel_finder);
             } else {
                 watchers.announce_specific(
                     ValueKind::Host,
-                    &UpdateMessage::AnswersCount(get_answered_count(self, watchers, &tunnel_finder)).into(),
+                    &UpdateMessage::AnswersCount(get_answered_count(self)).into(),
                     &tunnel_finder,
                 );
             }

@@ -301,9 +301,8 @@ async fn watch(
         }
 
         if let Some(watcher_id) = watcher_id {
+            let _ = data.game_manager.watcher_left(game_id, watcher_id);
             data.game_manager.remove_tunnel(watcher_id);
-
-            data.game_manager.remove_watcher_session(watcher_id);
         }
         session.close(None).await.ok();
     });

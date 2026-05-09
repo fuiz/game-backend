@@ -410,7 +410,18 @@ impl DurableObject for Game {
         Ok(())
     }
 
-    async fn websocket_close(&self, _ws: WebSocket, _code: usize, _reason: String, _was_clean: bool) -> Result<()> {
+    async fn websocket_close(&self, ws: WebSocket, _code: usize, _reason: String, _was_clean: bool) -> Result<()> {
+        let Some(watcher_id) = ws.deserialize_attachment::<watcher::Id>()? else {
+            return Ok(());
+        };
+
+        self.load_state().await;
+
+        self.with_mut_game_update_storage(|game| {
+            game.watcher_left(watcher_id);
+        })
+        .await?;
+
         Ok(())
     }
 }

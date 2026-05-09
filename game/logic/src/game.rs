@@ -1237,6 +1237,22 @@ impl Game {
         }
     }
 
+    /// Notify the game that a watcher's underlying session is gone.
+    ///
+    /// Drops them from the watcher live set and updates the active slide's
+    /// answer tally so subsequent O(1) "all answered" checks stay correct.
+    /// The watcher's role is preserved in `mapping` so they can reconnect via
+    /// [`Self::update_session`].
+    pub fn watcher_left(&mut self, watcher_id: Id) {
+        if let Some(watcher_value) = self.watchers.get_watcher_value(watcher_id)
+            && matches!(watcher_value.kind(), ValueKind::Player)
+            && let State::Slide(current_slide) = &mut self.state
+        {
+            current_slide.state.mark_watcher_left(watcher_id);
+        }
+        self.watchers.watcher_left(watcher_id);
+    }
+
     /// Updates the session associated with a participant (for reconnection)
     ///
     /// This method handles participant reconnection by updating their session
@@ -1256,6 +1272,15 @@ impl Game {
         let Some(watcher_value) = self.watchers.get_watcher_value(watcher_id) else {
             return;
         };
+
+        // Reconnection: re-add to the live set and let the active slide put
+        // any prior answer back into its live-answered tally.
+        self.watchers.watcher_returned(watcher_id);
+        if matches!(watcher_value.kind(), ValueKind::Player)
+            && let State::Slide(current_slide) = &mut self.state
+        {
+            current_slide.state.mark_watcher_returned(watcher_id);
+        }
 
         match watcher_value.clone() {
             Value::Host => {

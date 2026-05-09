@@ -338,7 +338,8 @@ impl Watchers {
     /// Updates the value/role of an existing watcher
     ///
     /// This method properly handles moving the watcher between different
-    /// type categories if their role changes.
+    /// type categories if their role changes. Always ensures the watcher is
+    /// present in `reverse_mapping[new_kind]` (i.e. live) afterwards.
     ///
     /// # Arguments
     ///
@@ -352,9 +353,28 @@ impl Watchers {
         let new_kind = watcher_value.kind();
         if old_kind != new_kind {
             self.reverse_mapping[old_kind].remove(&watcher_id);
-            self.reverse_mapping[new_kind].insert(watcher_id);
         }
+        self.reverse_mapping[new_kind].insert(watcher_id);
         self.mapping.insert(watcher_id, watcher_value);
+    }
+
+    /// Marks a watcher as no longer live (e.g. their session disconnected).
+    ///
+    /// Removes them from `reverse_mapping[kind]` so live-set queries like
+    /// [`Self::specific_count`] and [`Self::specific_iter`] skip them, but
+    /// keeps the entry in `mapping` so the watcher's role is preserved for
+    /// reconnection. Idempotent.
+    pub fn watcher_left(&mut self, watcher_id: Id) {
+        if let Some(v) = self.mapping.get(&watcher_id) {
+            self.reverse_mapping[v.kind()].remove(&watcher_id);
+        }
+    }
+
+    /// Marks a watcher as live again (e.g. they reconnected). Idempotent.
+    pub fn watcher_returned(&mut self, watcher_id: Id) {
+        if let Some(v) = self.mapping.get(&watcher_id) {
+            self.reverse_mapping[v.kind()].insert(watcher_id);
+        }
     }
 
     /// Gets the value/role of a specific watcher

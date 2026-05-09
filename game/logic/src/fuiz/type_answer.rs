@@ -85,6 +85,9 @@ pub struct State {
     // Runtime State
     /// Player text answers with submission timestamps
     user_answers: HashMap<Id, (String, SystemTime)>,
+    /// Distinct live players who have answered. Maintained incrementally.
+    #[serde(default)]
+    live_answered_count: usize,
     /// Time when text input was first enabled for players
     answer_start: Option<SystemTime>,
     /// Current phase of the slide presentation
@@ -106,6 +109,7 @@ impl SlideConfig {
         State {
             config: self.clone(),
             user_answers: HashMap::default(),
+            live_answered_count: 0,
             answer_start: Option::default(),
             state: SlideState::default(),
             cleaned_answers: self
@@ -249,6 +253,14 @@ impl AnswerHandler<String> for State {
 
     fn user_answers_mut(&mut self) -> &mut HashMap<Id, (String, SystemTime)> {
         &mut self.user_answers
+    }
+
+    fn live_answered_count(&self) -> usize {
+        self.live_answered_count
+    }
+
+    fn live_answered_count_mut(&mut self) -> &mut usize {
+        &mut self.live_answered_count
     }
 
     fn transform_answer(&self, answer: String) -> String {
@@ -547,12 +559,12 @@ impl QuestionReceiveMessage for State {
     ) {
         if let IncomingPlayerMessage::StringAnswer(v) = message {
             self.record_answer(watcher_id, v);
-            if all_players_answered(self, watchers, &tunnel_finder) {
+            if all_players_answered(self, watchers) {
                 self.send_answers_results(watchers, &tunnel_finder);
             } else {
                 watchers.announce_specific(
                     ValueKind::Host,
-                    &UpdateMessage::AnswersCount(get_answered_count(self, watchers, &tunnel_finder)).into(),
+                    &UpdateMessage::AnswersCount(get_answered_count(self)).into(),
                     &tunnel_finder,
                 );
             }

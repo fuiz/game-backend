@@ -378,6 +378,28 @@ impl SlideState {
             ),
         }
     }
+
+    /// Notify the active slide that a watcher has gone offline so it can
+    /// keep its live-answered counter in sync.
+    pub(crate) fn mark_watcher_left(&mut self, id: crate::watcher::Id) {
+        use crate::fuiz::common::AnswerHandler;
+        match self {
+            Self::MultipleChoice(s) => s.mark_watcher_left(id),
+            Self::TypeAnswer(s) => s.mark_watcher_left(id),
+            Self::Order(s) => s.mark_watcher_left(id),
+        }
+    }
+
+    /// Notify the active slide that a watcher has reconnected so it can
+    /// keep its live-answered counter in sync.
+    pub(crate) fn mark_watcher_returned(&mut self, id: crate::watcher::Id) {
+        use crate::fuiz::common::AnswerHandler;
+        match self {
+            Self::MultipleChoice(s) => s.mark_watcher_returned(id),
+            Self::TypeAnswer(s) => s.mark_watcher_returned(id),
+            Self::Order(s) => s.mark_watcher_returned(id),
+        }
+    }
 }
 
 #[cfg(test)]
