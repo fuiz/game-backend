@@ -1094,7 +1094,6 @@ impl Game {
             }) => match &mut self.state {
                 State::Slide(current_slide) if current_slide.index == *slide_index => {
                     if let SlideAction::Next { schedule_message } = current_slide.state.receive_alarm(
-                        &mut self.leaderboard,
                         &self.watchers,
                         self.team_manager.as_ref(),
                         schedule_message,
@@ -1192,7 +1191,6 @@ impl Game {
                 watcher_id,
                 watcher_kind,
                 self.team_manager.as_ref(),
-                &self.watchers,
                 tunnel_finder,
                 current_slide.index,
                 self.fuiz_config.len(),

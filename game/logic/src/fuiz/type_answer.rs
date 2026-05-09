@@ -430,26 +430,12 @@ impl State {
     /// Generates a synchronization message for a newly connected watcher
     ///
     /// # Arguments
-    /// * `_watcher_id` - ID of the connecting watcher
-    /// * `_watcher_kind` - Type of watcher (player/host)
-    /// * `_team_manager` - Optional team manager for team-based games
-    /// * `_watchers` - Connection manager
-    /// * `_tunnel_finder` - Function to find communication tunnels
     /// * `index` - Current slide index
     /// * `count` - Total number of slides
     ///
     /// # Returns
     /// * Appropriate sync message based on current slide state
-    pub fn state_message<F: TunnelFinder>(
-        &self,
-        _watcher_id: Id,
-        _watcher_kind: ValueKind,
-        _team_manager: Option<&TeamManager<crate::names::NameStyle>>,
-        _watchers: &Watchers,
-        _tunnel_finder: F,
-        index: usize,
-        count: usize,
-    ) -> SyncMessage {
+    pub fn state_message(&self, index: usize, count: usize) -> SyncMessage {
         match self.state() {
             SlideState::Unstarted | SlideState::Question => SyncMessage::QuestionAnnouncement {
                 index,
@@ -495,9 +481,7 @@ impl State {
     /// * A `SlideAction` indicating whether to stay on the current slide or advance
     pub(crate) fn receive_alarm<F: TunnelFinder, S: ScheduleMessageFn>(
         &mut self,
-        _leaderboard: &mut Leaderboard,
         watchers: &Watchers,
-        _team_manager: Option<&TeamManager<crate::names::NameStyle>>,
         schedule_message: S,
         tunnel_finder: F,
         message: &crate::AlarmMessage,

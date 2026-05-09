@@ -650,7 +650,6 @@ impl State {
     /// * `watcher_id` - ID of the participant to synchronize
     /// * `watcher_kind` - Type of participant (host, player, unassigned)
     /// * `team_manager` - Optional team manager for team-based games
-    /// * `watchers` - Connection manager for all participants
     /// * `tunnel_finder` - Function to find communication tunnels for participants
     /// * `index` - Current slide index in the game
     /// * `count` - Total number of slides in the game
@@ -668,7 +667,6 @@ impl State {
         watcher_id: Id,
         watcher_kind: ValueKind,
         team_manager: Option<&TeamManager<crate::names::NameStyle>>,
-        _watchers: &Watchers,
         tunnel_finder: F,
         index: usize,
         count: usize,
@@ -729,14 +727,12 @@ impl State {
     ///
     /// # Arguments
     ///
-    /// * `_leaderboard` - Mutable reference to the game leaderboard (unused)
     /// * `watchers` - Connection manager for all participants
     /// * `team_manager` - Optional team manager for team-based games
     /// * `schedule_message` - Function to schedule delayed messages for timing
     /// * `tunnel_finder` - Function to find communication tunnels for participants
     /// * `message` - The alarm message to process
     /// * `index` - Current slide index in the game
-    /// * `_count` - Total number of slides in the game (unused)
     ///
     /// # Returns
     ///
@@ -749,14 +745,12 @@ impl State {
     /// * `S` - Function type for scheduling alarm messages
     pub(crate) fn receive_alarm<F: TunnelFinder, S: ScheduleMessageFn>(
         &mut self,
-        _leaderboard: &mut Leaderboard,
         watchers: &Watchers,
         team_manager: Option<&TeamManager<crate::names::NameStyle>>,
         schedule_message: S,
         tunnel_finder: F,
         message: &crate::AlarmMessage,
         index: usize,
-        _count: usize,
     ) -> SlideAction<S> {
         if let crate::AlarmMessage::MultipleChoice(AlarmMessage::ProceedFromSlideIntoSlide { index: _, to }) = message {
             match to {

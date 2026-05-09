@@ -478,32 +478,13 @@ impl State {
     ///
     /// # Arguments
     ///
-    /// * `_watcher_id` - ID of the participant to synchronize (unused)
-    /// * `_watcher_kind` - Type of participant (unused)
-    /// * `_team_manager` - Optional team manager for team-based games (unused)
-    /// * `_watchers` - Connection manager for all participants (unused)
-    /// * `_tunnel_finder` - Function to find communication tunnels (unused)
     /// * `index` - Current slide index in the game
     /// * `count` - Total number of slides in the game
     ///
     /// # Returns
     ///
     /// A `SyncMessage` appropriate for the current state
-    ///
-    /// # Type Parameters
-    ///
-    /// * `T` - Type implementing the Tunnel trait for participant communication
-    /// * `F` - Function type for finding tunnels by participant ID
-    pub fn state_message<F: TunnelFinder>(
-        &self,
-        _watcher_id: Id,
-        _watcher_kind: ValueKind,
-        _team_manager: Option<&TeamManager<crate::names::NameStyle>>,
-        _watchers: &Watchers,
-        _tunnel_finder: F,
-        index: usize,
-        count: usize,
-    ) -> SyncMessage {
+    pub fn state_message(&self, index: usize, count: usize) -> SyncMessage {
         match self.state() {
             SlideState::Unstarted | SlideState::Question => SyncMessage::QuestionAnnouncement {
                 index,
@@ -564,9 +545,7 @@ impl State {
     /// * `S` - Function type for scheduling alarm messages
     pub(crate) fn receive_alarm<F: TunnelFinder, S: ScheduleMessageFn>(
         &mut self,
-        _leaderboard: &mut Leaderboard,
         watchers: &Watchers,
-        _team_manager: Option<&TeamManager<crate::names::NameStyle>>,
         schedule_message: S,
         tunnel_finder: F,
         message: &crate::AlarmMessage,

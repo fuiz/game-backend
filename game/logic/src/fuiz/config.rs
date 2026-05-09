@@ -264,7 +264,6 @@ impl SlideState {
     /// * `watcher_id` - ID of the participant requesting synchronization
     /// * `watcher_kind` - The type of participant (host, player, etc.)
     /// * `team_manager` - Optional team manager for team-based games
-    /// * `watchers` - The watchers manager for participant information
     /// * `tunnel_finder` - Function to find communication tunnels
     /// * `index` - The current slide index
     /// * `count` - The total number of slides
@@ -277,7 +276,6 @@ impl SlideState {
         watcher_id: Id,
         watcher_kind: ValueKind,
         team_manager: Option<&TeamManager<crate::names::NameStyle>>,
-        watchers: &Watchers,
         tunnel_finder: F,
         index: usize,
         count: usize,
@@ -287,29 +285,12 @@ impl SlideState {
                 watcher_id,
                 watcher_kind,
                 team_manager,
-                watchers,
                 tunnel_finder,
                 index,
                 count,
             )),
-            Self::TypeAnswer(s) => SyncMessage::TypeAnswer(s.state_message(
-                watcher_id,
-                watcher_kind,
-                team_manager,
-                watchers,
-                tunnel_finder,
-                index,
-                count,
-            )),
-            Self::Order(s) => SyncMessage::Order(s.state_message(
-                watcher_id,
-                watcher_kind,
-                team_manager,
-                watchers,
-                tunnel_finder,
-                index,
-                count,
-            )),
+            Self::TypeAnswer(s) => SyncMessage::TypeAnswer(s.state_message(index, count)),
+            Self::Order(s) => SyncMessage::Order(s.state_message(index, count)),
         }
     }
 
@@ -322,7 +303,6 @@ impl SlideState {
     ///
     /// # Arguments
     ///
-    /// * `leaderboard` - The game's leaderboard for score tracking
     /// * `watchers` - The watchers manager for participant communication
     /// * `team_manager` - Optional team manager for team-based games
     /// * `schedule_message` - Function to schedule additional timed messages
@@ -336,7 +316,6 @@ impl SlideState {
     /// A `SlideAction` indicating whether to stay on the current slide or advance
     pub(crate) fn receive_alarm<F: TunnelFinder, S: ScheduleMessageFn>(
         &mut self,
-        leaderboard: &mut Leaderboard,
         watchers: &Watchers,
         team_manager: Option<&TeamManager<crate::names::NameStyle>>,
         schedule_message: S,
@@ -346,36 +325,11 @@ impl SlideState {
         count: usize,
     ) -> SlideAction<S> {
         match self {
-            Self::MultipleChoice(s) => s.receive_alarm(
-                leaderboard,
-                watchers,
-                team_manager,
-                schedule_message,
-                tunnel_finder,
-                message,
-                index,
-                count,
-            ),
-            Self::TypeAnswer(s) => s.receive_alarm(
-                leaderboard,
-                watchers,
-                team_manager,
-                schedule_message,
-                tunnel_finder,
-                message,
-                index,
-                count,
-            ),
-            Self::Order(s) => s.receive_alarm(
-                leaderboard,
-                watchers,
-                team_manager,
-                schedule_message,
-                tunnel_finder,
-                message,
-                index,
-                count,
-            ),
+            Self::MultipleChoice(s) => {
+                s.receive_alarm(watchers, team_manager, schedule_message, tunnel_finder, message, index)
+            }
+            Self::TypeAnswer(s) => s.receive_alarm(watchers, schedule_message, tunnel_finder, message, index, count),
+            Self::Order(s) => s.receive_alarm(watchers, schedule_message, tunnel_finder, message, index, count),
         }
     }
 
@@ -659,10 +613,9 @@ mod tests {
     fn test_slide_state_state_message_multiple_choice() {
         let mc_config = create_test_multiple_choice_config();
         let state = mc_config.to_state();
-        let watchers = create_mock_watchers();
         let tunnel_finder = create_mock_tunnel_finder();
 
-        let message = state.state_message(Id::new(), ValueKind::Player, None, &watchers, tunnel_finder, 0, 1);
+        let message = state.state_message(Id::new(), ValueKind::Player, None, tunnel_finder, 0, 1);
 
         match message {
             SyncMessage::MultipleChoice(_) => {}
@@ -674,10 +627,9 @@ mod tests {
     fn test_slide_state_state_message_type_answer() {
         let ta_config = create_test_type_answer_config();
         let state = ta_config.to_state();
-        let watchers = create_mock_watchers();
         let tunnel_finder = create_mock_tunnel_finder();
 
-        let message = state.state_message(Id::new(), ValueKind::Player, None, &watchers, tunnel_finder, 0, 1);
+        let message = state.state_message(Id::new(), ValueKind::Player, None, tunnel_finder, 0, 1);
 
         match message {
             SyncMessage::TypeAnswer(_) => {}
@@ -689,10 +641,9 @@ mod tests {
     fn test_slide_state_state_message_order() {
         let order_config = create_test_order_config();
         let state = order_config.to_state();
-        let watchers = create_mock_watchers();
         let tunnel_finder = create_mock_tunnel_finder();
 
-        let message = state.state_message(Id::new(), ValueKind::Player, None, &watchers, tunnel_finder, 0, 1);
+        let message = state.state_message(Id::new(), ValueKind::Player, None, tunnel_finder, 0, 1);
 
         match message {
             SyncMessage::Order(_) => {}
@@ -747,7 +698,6 @@ mod tests {
         let mut state = ta_config.to_state();
         let watchers = create_mock_watchers();
         let tunnel_finder = create_mock_tunnel_finder();
-        let mut leaderboard = create_mock_leaderboard();
         let mut schedule_message = |_msg: AlarmMessage, _duration: std::time::Duration| {};
 
         let alarm_message = AlarmMessage::TypeAnswer(type_answer::AlarmMessage::ProceedFromSlideIntoSlide {
@@ -756,7 +706,6 @@ mod tests {
         });
 
         let _result = state.receive_alarm(
-            &mut leaderboard,
             &watchers,
             None,
             &mut schedule_message,
@@ -775,7 +724,6 @@ mod tests {
         let mut state = order_config.to_state();
         let watchers = create_mock_watchers();
         let tunnel_finder = create_mock_tunnel_finder();
-        let mut leaderboard = create_mock_leaderboard();
         let mut schedule_message = |_msg: AlarmMessage, _duration: std::time::Duration| {};
 
         let alarm_message = AlarmMessage::Order(order::AlarmMessage::ProceedFromSlideIntoSlide {
@@ -784,7 +732,6 @@ mod tests {
         });
 
         let _result = state.receive_alarm(
-            &mut leaderboard,
             &watchers,
             None,
             &mut schedule_message,
@@ -803,7 +750,6 @@ mod tests {
         let mut state = mc_config.to_state();
         let watchers = create_mock_watchers();
         let tunnel_finder = create_mock_tunnel_finder();
-        let mut leaderboard = create_mock_leaderboard();
         let mut schedule_message = |_msg: AlarmMessage, _duration: std::time::Duration| {};
 
         let alarm_message = AlarmMessage::MultipleChoice(multiple_choice::AlarmMessage::ProceedFromSlideIntoSlide {
@@ -812,7 +758,6 @@ mod tests {
         });
 
         let _result = state.receive_alarm(
-            &mut leaderboard,
             &watchers,
             None,
             &mut schedule_message,
