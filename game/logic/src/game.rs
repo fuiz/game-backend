@@ -457,8 +457,7 @@ impl Game {
 
         let player_names = self
             .watchers
-            .specific_vec(ValueKind::Player, tunnel_finder)
-            .into_iter()
+            .specific_iter(ValueKind::Player, tunnel_finder)
             .filter_map(|(_, _, x)| match x {
                 Value::Player(player_value) => Some(player_value.name().to_owned()),
                 _ => None,

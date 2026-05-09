@@ -272,13 +272,26 @@ impl Watchers {
     /// Vector of tuples containing (ID, Tunnel, Value) for participants
     /// of the specified type with active tunnels
     pub fn specific_vec<F: TunnelFinder>(&self, filter: ValueKind, tunnel_finder: F) -> Vec<(Id, F::Tunnel, Value)> {
-        self.reverse_mapping[filter]
-            .iter()
-            .filter_map(|x| match (tunnel_finder(*x), self.mapping.get(x)) {
-                (Some(t), Some(v)) => Some((*x, t, v.to_owned())),
-                _ => None,
-            })
+        self.specific_iter(filter, tunnel_finder)
+            .map(|(id, t, v)| (id, t, v.to_owned()))
             .collect_vec()
+    }
+
+    /// Lazy iterator over participants of a specific type with active tunnels.
+    ///
+    /// Like [`Self::specific_vec`] but doesn't eagerly collect or clone, so
+    /// callers that only need a prefix (e.g. via `.take(N)`) can avoid the
+    /// per-watcher work for the rest of the set.
+    pub fn specific_iter<F: TunnelFinder>(
+        &self,
+        filter: ValueKind,
+        tunnel_finder: F,
+    ) -> impl Iterator<Item = (Id, F::Tunnel, &Value)> {
+        self.reverse_mapping[filter].iter().filter_map(move |id| {
+            let tunnel = tunnel_finder(*id)?;
+            let value = self.mapping.get(id)?;
+            Some((*id, tunnel, value))
+        })
     }
 
     /// Gets the count of participants of a specific type
