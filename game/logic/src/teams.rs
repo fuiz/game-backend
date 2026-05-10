@@ -115,7 +115,7 @@ impl<N: names::NamingScheme> TeamManager<N> {
             let preference_groups = self.create_preference_groups(&players);
             let balanced_teams = self.balance_teams(&preference_groups, players.len());
             let team_id_names = self.create_team_id_names(balanced_teams, names, profanity);
-            let result = self.assign_all_players_to_teams(&team_id_names, names, watchers);
+            let result = self.assign_all_players_to_teams(&team_id_names, watchers);
             self.teams = Some(result);
         }
     }
@@ -255,13 +255,12 @@ impl<N: names::NamingScheme> TeamManager<N> {
     fn assign_all_players_to_teams(
         &mut self,
         teams: &[(Id, String, Vec<Id>)],
-        names: &names::Names,
         watchers: &mut Watchers,
     ) -> Vec<(Id, String)> {
         teams
             .iter()
             .map(|(team_id, team_name, players)| {
-                self.assign_players_to_team(players, *team_id, team_name, names, watchers);
+                self.assign_players_to_team(players, *team_id, team_name, watchers);
                 (*team_id, team_name.clone())
             })
             .collect()
@@ -304,21 +303,13 @@ impl<N: names::NamingScheme> TeamManager<N> {
             .collect()
     }
 
-    fn assign_players_to_team(
-        &mut self,
-        players: &[Id],
-        team_id: Id,
-        team_name: &str,
-        names: &names::Names,
-        watchers: &mut Watchers,
-    ) {
+    fn assign_players_to_team(&mut self, players: &[Id], team_id: Id, team_name: &str, watchers: &mut Watchers) {
         for &player_id in players {
             self.player_to_team.insert(player_id, team_id);
             watchers.update_watcher_value(
                 player_id,
                 watcher::Value::Player(watcher::PlayerValue::Team {
                     team_name: team_name.to_owned(),
-                    individual_name: names.get_name(&player_id).unwrap_or_default().to_owned(),
                     team_id,
                 }),
             );
@@ -417,12 +408,10 @@ impl<N: names::NamingScheme> TeamManager<N> {
 
             p.push(player_id);
 
-            let individual_name = watchers.get_name(player_id).unwrap_or_default().to_owned();
             watchers.update_watcher_value(
                 player_id,
                 watcher::Value::Player(watcher::PlayerValue::Team {
                     team_name: team_name.to_owned(),
-                    individual_name,
                     team_id: *team_id,
                 }),
             );
@@ -579,12 +568,7 @@ mod tests {
         for player in &players {
             assert!(
                 watchers
-                    .add_watcher(
-                        *player,
-                        watcher::Value::Player(watcher::PlayerValue::Individual {
-                            name: format!("Player {player}")
-                        }),
-                    )
+                    .add_watcher(*player, watcher::Value::Player(watcher::PlayerValue::Individual),)
                     .is_ok()
             );
         }
@@ -735,12 +719,7 @@ mod tests {
 
         for player in [player1, player2] {
             watchers
-                .add_watcher(
-                    player,
-                    watcher::Value::Player(watcher::PlayerValue::Individual {
-                        name: format!("Player {player}"),
-                    }),
-                )
+                .add_watcher(player, watcher::Value::Player(watcher::PlayerValue::Individual))
                 .unwrap();
         }
 
@@ -765,24 +744,14 @@ mod tests {
 
         for player in [player1, player2] {
             watchers
-                .add_watcher(
-                    player,
-                    watcher::Value::Player(watcher::PlayerValue::Individual {
-                        name: format!("Player {player}"),
-                    }),
-                )
+                .add_watcher(player, watcher::Value::Player(watcher::PlayerValue::Individual))
                 .unwrap();
         }
 
         manager.finalize(&mut watchers, &mut names, tunnel, Profanity::Censor);
 
         watchers
-            .add_watcher(
-                player3,
-                watcher::Value::Player(watcher::PlayerValue::Individual {
-                    name: format!("Player {player3}"),
-                }),
-            )
+            .add_watcher(player3, watcher::Value::Player(watcher::PlayerValue::Individual))
             .unwrap();
 
         let team_name = manager.add_player(player3, &mut watchers);
@@ -801,12 +770,7 @@ mod tests {
         let player1 = Id::new();
 
         watchers
-            .add_watcher(
-                player1,
-                watcher::Value::Player(watcher::PlayerValue::Individual {
-                    name: format!("Player {player1}"),
-                }),
-            )
+            .add_watcher(player1, watcher::Value::Player(watcher::PlayerValue::Individual))
             .unwrap();
 
         manager.finalize(&mut watchers, &mut names, tunnel, Profanity::Censor);
@@ -831,12 +795,7 @@ mod tests {
 
         for player in [player1, player2, player3] {
             watchers
-                .add_watcher(
-                    player,
-                    watcher::Value::Player(watcher::PlayerValue::Individual {
-                        name: format!("Player {player}"),
-                    }),
-                )
+                .add_watcher(player, watcher::Value::Player(watcher::PlayerValue::Individual))
                 .unwrap();
         }
 
@@ -868,12 +827,7 @@ mod tests {
 
         for player in [player1, player2, player3, player4] {
             watchers
-                .add_watcher(
-                    player,
-                    watcher::Value::Player(watcher::PlayerValue::Individual {
-                        name: format!("Player {player}"),
-                    }),
-                )
+                .add_watcher(player, watcher::Value::Player(watcher::PlayerValue::Individual))
                 .unwrap();
         }
 
@@ -900,12 +854,7 @@ mod tests {
 
         for player in [player1, player2] {
             watchers
-                .add_watcher(
-                    player,
-                    watcher::Value::Player(watcher::PlayerValue::Individual {
-                        name: format!("Player {player}"),
-                    }),
-                )
+                .add_watcher(player, watcher::Value::Player(watcher::PlayerValue::Individual))
                 .unwrap();
         }
 
@@ -930,12 +879,7 @@ mod tests {
 
         for player in [player1, player2, player3, player4] {
             watchers
-                .add_watcher(
-                    player,
-                    watcher::Value::Player(watcher::PlayerValue::Individual {
-                        name: format!("Player {player}"),
-                    }),
-                )
+                .add_watcher(player, watcher::Value::Player(watcher::PlayerValue::Individual))
                 .unwrap();
         }
 
@@ -965,12 +909,7 @@ mod tests {
 
         for player in [player1, player2, player3, player4, player5] {
             watchers
-                .add_watcher(
-                    player,
-                    watcher::Value::Player(watcher::PlayerValue::Individual {
-                        name: format!("Player {player}"),
-                    }),
-                )
+                .add_watcher(player, watcher::Value::Player(watcher::PlayerValue::Individual))
                 .unwrap();
         }
 
@@ -1002,12 +941,7 @@ mod tests {
 
         for player in [player1, player2, player3] {
             watchers
-                .add_watcher(
-                    player,
-                    watcher::Value::Player(watcher::PlayerValue::Individual {
-                        name: format!("Player {player}"),
-                    }),
-                )
+                .add_watcher(player, watcher::Value::Player(watcher::PlayerValue::Individual))
                 .unwrap();
         }
 
@@ -1046,12 +980,7 @@ mod tests {
         let player = Id::new();
 
         watchers
-            .add_watcher(
-                player,
-                watcher::Value::Player(watcher::PlayerValue::Individual {
-                    name: format!("Player {player}"),
-                }),
-            )
+            .add_watcher(player, watcher::Value::Player(watcher::PlayerValue::Individual))
             .unwrap();
 
         let result = manager.add_player(player, &mut watchers);
@@ -1073,12 +1002,7 @@ mod tests {
 
         for player in [player1, player2, player3, player4] {
             watchers
-                .add_watcher(
-                    player,
-                    watcher::Value::Player(watcher::PlayerValue::Individual {
-                        name: format!("Player {player}"),
-                    }),
-                )
+                .add_watcher(player, watcher::Value::Player(watcher::PlayerValue::Individual))
                 .unwrap();
         }
 
@@ -1113,12 +1037,7 @@ mod tests {
 
         for player in [player1, player2, player3] {
             watchers
-                .add_watcher(
-                    player,
-                    watcher::Value::Player(watcher::PlayerValue::Individual {
-                        name: format!("Player {player}"),
-                    }),
-                )
+                .add_watcher(player, watcher::Value::Player(watcher::PlayerValue::Individual))
                 .unwrap();
         }
 
@@ -1162,12 +1081,7 @@ mod tests {
 
         for player in [player1, player2] {
             watchers
-                .add_watcher(
-                    player,
-                    watcher::Value::Player(watcher::PlayerValue::Individual {
-                        name: format!("Player {player}"),
-                    }),
-                )
+                .add_watcher(player, watcher::Value::Player(watcher::PlayerValue::Individual))
                 .unwrap();
         }
 
@@ -1631,10 +1545,10 @@ mod tests {
             let mut manager = TeamManager::new(3, false, NameStyle::default());
             let host_id = Id::new();
             let mut watchers = Watchers::with_host_id(host_id, 1000);
-            let names = names::Names::default();
+            let _names = names::Names::default();
 
             let teams = vec![];
-            let result = manager.assign_all_players_to_teams(&teams, &names, &mut watchers);
+            let result = manager.assign_all_players_to_teams(&teams, &mut watchers);
 
             assert!(result.is_empty());
             assert!(manager.player_to_team.is_empty());
@@ -1646,7 +1560,7 @@ mod tests {
             let mut manager = TeamManager::new(3, false, NameStyle::default());
             let host_id = Id::new();
             let mut watchers = Watchers::with_host_id(host_id, 1000);
-            let names = names::Names::default();
+            let _names = names::Names::default();
 
             let player1 = Id::new();
             let player2 = Id::new();
@@ -1655,17 +1569,12 @@ mod tests {
 
             for player in [player1, player2] {
                 watchers
-                    .add_watcher(
-                        player,
-                        watcher::Value::Player(watcher::PlayerValue::Individual {
-                            name: format!("Player {player}"),
-                        }),
-                    )
+                    .add_watcher(player, watcher::Value::Player(watcher::PlayerValue::Individual))
                     .unwrap();
             }
 
             let teams = vec![(team_id, team_name.clone(), vec![player1, player2])];
-            let result = manager.assign_all_players_to_teams(&teams, &names, &mut watchers);
+            let result = manager.assign_all_players_to_teams(&teams, &mut watchers);
 
             assert_eq!(result.len(), 1);
             assert_eq!(result[0], (team_id, team_name));
@@ -1682,7 +1591,7 @@ mod tests {
             let mut manager = TeamManager::new(2, false, NameStyle::default());
             let host_id = Id::new();
             let mut watchers = Watchers::with_host_id(host_id, 1000);
-            let names = names::Names::default();
+            let _names = names::Names::default();
 
             let player1 = Id::new();
             let player2 = Id::new();
@@ -1695,12 +1604,7 @@ mod tests {
 
             for player in [player1, player2, player3, player4] {
                 watchers
-                    .add_watcher(
-                        player,
-                        watcher::Value::Player(watcher::PlayerValue::Individual {
-                            name: format!("Player {player}"),
-                        }),
-                    )
+                    .add_watcher(player, watcher::Value::Player(watcher::PlayerValue::Individual))
                     .unwrap();
             }
 
@@ -1708,7 +1612,7 @@ mod tests {
                 (team1_id, team1_name.clone(), vec![player1, player2]),
                 (team2_id, team2_name.clone(), vec![player3, player4]),
             ];
-            let result = manager.assign_all_players_to_teams(&teams, &names, &mut watchers);
+            let result = manager.assign_all_players_to_teams(&teams, &mut watchers);
 
             assert_eq!(result.len(), 2);
             assert_eq!(result[0], (team1_id, team1_name));
@@ -1730,7 +1634,7 @@ mod tests {
             let mut manager = TeamManager::new(3, false, NameStyle::default());
             let host_id = Id::new();
             let mut watchers = Watchers::with_host_id(host_id, 1000);
-            let names = names::Names::default();
+            let _names = names::Names::default();
 
             let player1 = Id::new();
             let player2 = Id::new();
@@ -1741,12 +1645,7 @@ mod tests {
 
             for player in [player1, player2, player3] {
                 watchers
-                    .add_watcher(
-                        player,
-                        watcher::Value::Player(watcher::PlayerValue::Individual {
-                            name: format!("Player {player}"),
-                        }),
-                    )
+                    .add_watcher(player, watcher::Value::Player(watcher::PlayerValue::Individual))
                     .unwrap();
             }
 
@@ -1755,7 +1654,7 @@ mod tests {
                 (team2_id, "Team 2".to_string(), vec![player2]),
                 (team3_id, "Team 3".to_string(), vec![player3]),
             ];
-            let result = manager.assign_all_players_to_teams(&teams, &names, &mut watchers);
+            let result = manager.assign_all_players_to_teams(&teams, &mut watchers);
 
             assert_eq!(result.len(), 3);
 
@@ -1786,17 +1685,12 @@ mod tests {
 
             for player in [player1, player2] {
                 watchers
-                    .add_watcher(
-                        player,
-                        watcher::Value::Player(watcher::PlayerValue::Individual {
-                            name: format!("Player {player}"),
-                        }),
-                    )
+                    .add_watcher(player, watcher::Value::Player(watcher::PlayerValue::Individual))
                     .unwrap();
             }
 
             let teams = vec![(team_id, team_name.clone(), vec![player1, player2])];
-            manager.assign_all_players_to_teams(&teams, &names, &mut watchers);
+            manager.assign_all_players_to_teams(&teams, &mut watchers);
 
             match watchers.get_watcher_value(player1) {
                 Some(watcher::Value::Player(watcher::PlayerValue::Team {
@@ -1824,13 +1718,13 @@ mod tests {
             let mut manager = TeamManager::new(3, false, NameStyle::default());
             let host_id = Id::new();
             let mut watchers = Watchers::with_host_id(host_id, 1000);
-            let names = names::Names::default();
+            let _names = names::Names::default();
 
             let team_id = Id::new();
             let team_name = "Empty Team".to_string();
 
             let teams = vec![(team_id, team_name.clone(), vec![])];
-            let result = manager.assign_all_players_to_teams(&teams, &names, &mut watchers);
+            let result = manager.assign_all_players_to_teams(&teams, &mut watchers);
 
             assert_eq!(result.len(), 1);
             assert_eq!(result[0], (team_id, team_name));

@@ -462,10 +462,7 @@ impl Game {
             available: self
                 .watchers
                 .specific_iter(ValueKind::Player, tunnel_finder)
-                .filter_map(|(id, _, value)| match value {
-                    Value::Player(player_value) => Some((player_value.name(), pref.contains(&id))),
-                    _ => None,
-                })
+                .filter_map(|(id, _, _)| Some((self.names.get_name(&id)?, pref.contains(&id))))
                 .collect(),
         }
     }
@@ -484,10 +481,7 @@ impl Game {
         TruncatedVec::new(
             self.watchers
                 .specific_iter(ValueKind::Player, tunnel_finder)
-                .filter_map(|(_, _, value)| match value {
-                    Value::Player(player_value) => Some(player_value.name()),
-                    _ => None,
-                }),
+                .filter_map(|(id, _, _)| self.names.get_name(&id)),
             exact_count,
             exact_count,
         )
@@ -868,10 +862,8 @@ impl Game {
     ) -> Result<(), names::Error> {
         let name = self.names.set_name(watcher, name, self.options.profanity)?;
 
-        self.watchers.update_watcher_value(
-            watcher,
-            Value::Player(watcher::PlayerValue::Individual { name: name.clone() }),
-        );
+        self.watchers
+            .update_watcher_value(watcher, Value::Player(watcher::PlayerValue::Individual));
 
         self.update_player_with_name(watcher, &name, tunnel_finder);
 
@@ -1179,10 +1171,7 @@ impl Game {
                         available: self
                             .watchers
                             .specific_iter(ValueKind::Player, tunnel_finder)
-                            .filter_map(|(id, _, value)| match value {
-                                Value::Player(player_value) => Some((player_value.name(), pref.contains(&id))),
-                                _ => None,
-                            })
+                            .filter_map(|(id, _, _)| Some((self.names.get_name(&id)?, pref.contains(&id))))
                             .collect(),
                     }
                     .into()
@@ -1282,7 +1271,7 @@ impl Game {
                 current_slide.state.mark_watcher_left(watcher_id);
             }
             if matches!(self.state, State::WaitingScreen)
-                && let Some(name) = self.watchers.get_name(watcher_id)
+                && let Some(name) = self.names.get_name(&watcher_id)
             {
                 self.watchers.announce_specific(
                     ValueKind::Host,
@@ -1343,15 +1332,10 @@ impl Game {
                 );
             }
             Value::Player(player_value) => {
-                if let PlayerValue::Team {
-                    team_name,
-                    individual_name: _,
-                    team_id: _,
-                } = player_value
-                {
+                if let PlayerValue::Team { team_name, team_id: _ } = player_value {
                     Watchers::send_message(&UpdateMessage::FindTeam(team_name).into(), watcher_id, &tunnel_finder);
                 }
-                let player_name = player_value.name().to_owned();
+                let player_name = self.names.get_name(&watcher_id).unwrap_or_default().to_owned();
                 Watchers::send_message(
                     &UpdateMessage::NameAssign(&player_name).into(),
                     watcher_id,

@@ -118,42 +118,21 @@ impl Value {
 
 /// Player-specific data and state
 ///
-/// This enum differentiates between individual players and team players,
-/// tracking the necessary information for each type.
+/// Names are owned by [`crate::names::Names`] keyed by `Id`; this enum only
+/// records the team association (if any). Resolve the player's name via
+/// `Names::get_name(id)`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serializable", derive(Serialize, Deserialize))]
 pub enum PlayerValue {
     /// An individual player not part of a team
-    Individual {
-        /// The player's chosen name
-        name: String,
-    },
+    Individual,
     /// A player who is part of a team
     Team {
         /// The name of the team
         team_name: String,
-        /// The individual player's name within the team
-        individual_name: String,
         /// The unique identifier for the team
         team_id: Id,
     },
-}
-
-impl PlayerValue {
-    /// Gets the individual name of the player
-    ///
-    /// For individual players, this returns their name.
-    /// For team players, this returns their individual name within the team.
-    pub fn name(&self) -> &str {
-        match self {
-            Self::Individual { name } => name,
-            Self::Team {
-                team_name: _,
-                individual_name,
-                team_id: _,
-            } => individual_name,
-        }
-    }
 }
 
 /// Serialization helper for Watchers struct. Only compiled when persistence
@@ -474,24 +453,6 @@ impl Watchers {
         });
     }
 
-    /// Gets the display name of a watcher
-    ///
-    /// This only returns a name for player watchers, not hosts or unassigned connections.
-    ///
-    /// # Arguments
-    ///
-    /// * `watcher_id` - The ID of the watcher
-    ///
-    /// # Returns
-    ///
-    /// The player's name if they are a player, otherwise `None`
-    pub fn get_name(&self, watcher_id: Id) -> Option<&str> {
-        self.get_watcher_value_ref(watcher_id).and_then(|v| match v {
-            Value::Player(player_value) => Some(player_value.name()),
-            _ => None,
-        })
-    }
-
     /// Gets the team name of a watcher if they are part of a team
     ///
     /// # Arguments
@@ -665,25 +626,8 @@ mod tests {
         assert_eq!(Value::Unassigned.kind(), ValueKind::Unassigned);
         assert_eq!(Value::Host.kind(), ValueKind::Host);
 
-        let player_value = PlayerValue::Individual {
-            name: "Alice".to_string(),
-        };
+        let player_value = PlayerValue::Individual;
         assert_eq!(Value::Player(player_value).kind(), ValueKind::Player);
-    }
-
-    #[test]
-    fn test_player_value_name() {
-        let individual = PlayerValue::Individual {
-            name: "Alice".to_string(),
-        };
-        assert_eq!(individual.name(), "Alice");
-
-        let team_player = PlayerValue::Team {
-            team_name: "Team A".to_string(),
-            individual_name: "Bob".to_string(),
-            team_id: Id::new(),
-        };
-        assert_eq!(team_player.name(), "Bob");
     }
 
     #[test]
@@ -723,9 +667,7 @@ mod tests {
     fn test_add_player_watcher() {
         let mut watchers = Watchers::new(1000);
         let player_id = Id::new();
-        let player_value = Value::Player(PlayerValue::Individual {
-            name: "Alice".to_string(),
-        });
+        let player_value = Value::Player(PlayerValue::Individual);
 
         let result = watchers.add_watcher(player_id, player_value.clone());
         assert!(result.is_ok());
@@ -733,7 +675,6 @@ mod tests {
         assert!(watchers.has_watcher(player_id));
         assert_eq!(watchers.specific_count(ValueKind::Player), 1);
         assert_eq!(watchers.get_watcher_value(player_id), Some(player_value));
-        assert_eq!(watchers.get_name(player_id), Some("Alice"));
     }
 
     #[test]
@@ -743,7 +684,6 @@ mod tests {
         let team_id = Id::new();
         let player_value = Value::Player(PlayerValue::Team {
             team_name: "Team A".to_string(),
-            individual_name: "Bob".to_string(),
             team_id,
         });
 
@@ -752,7 +692,6 @@ mod tests {
 
         assert!(watchers.has_watcher(player_id));
         assert_eq!(watchers.specific_count(ValueKind::Player), 1);
-        assert_eq!(watchers.get_name(player_id), Some("Bob"));
         assert_eq!(watchers.get_team_name(player_id), Some("Team A"));
     }
 
@@ -784,9 +723,7 @@ mod tests {
         assert_eq!(watchers.specific_count(ValueKind::Player), 0);
 
         // Update to player
-        let player_value = Value::Player(PlayerValue::Individual {
-            name: "Alice".to_string(),
-        });
+        let player_value = Value::Player(PlayerValue::Individual);
         watchers.update_watcher_value(watcher_id, player_value.clone());
 
         assert_eq!(watchers.specific_count(ValueKind::Unassigned), 0);
@@ -816,12 +753,7 @@ mod tests {
 
         watchers.add_watcher(id1, Value::Host).unwrap();
         watchers
-            .add_watcher(
-                id2,
-                Value::Player(PlayerValue::Individual {
-                    name: "Alice".to_string(),
-                }),
-            )
+            .add_watcher(id2, Value::Player(PlayerValue::Individual))
             .unwrap();
         watchers.add_watcher(id3, Value::Unassigned).unwrap();
 
@@ -853,20 +785,10 @@ mod tests {
 
         watchers.add_watcher(host_id, Value::Host).unwrap();
         watchers
-            .add_watcher(
-                player1_id,
-                Value::Player(PlayerValue::Individual {
-                    name: "Alice".to_string(),
-                }),
-            )
+            .add_watcher(player1_id, Value::Player(PlayerValue::Individual))
             .unwrap();
         watchers
-            .add_watcher(
-                player2_id,
-                Value::Player(PlayerValue::Individual {
-                    name: "Bob".to_string(),
-                }),
-            )
+            .add_watcher(player2_id, Value::Player(PlayerValue::Individual))
             .unwrap();
 
         // Tunnel for host + player1, not for player2 — so player2 is filtered.
@@ -1010,31 +932,13 @@ mod tests {
     }
 
     #[test]
-    fn test_get_name_for_non_player() {
-        let mut watchers = Watchers::new(1000);
-        let host_id = Id::new();
-        let unassigned_id = Id::new();
-
-        watchers.add_watcher(host_id, Value::Host).unwrap();
-        watchers.add_watcher(unassigned_id, Value::Unassigned).unwrap();
-
-        assert_eq!(watchers.get_name(host_id), None);
-        assert_eq!(watchers.get_name(unassigned_id), None);
-    }
-
-    #[test]
     fn test_get_team_name_for_non_team_player() {
         let mut watchers = Watchers::new(1000);
         let individual_id = Id::new();
         let host_id = Id::new();
 
         watchers
-            .add_watcher(
-                individual_id,
-                Value::Player(PlayerValue::Individual {
-                    name: "Alice".to_string(),
-                }),
-            )
+            .add_watcher(individual_id, Value::Player(PlayerValue::Individual))
             .unwrap();
         watchers.add_watcher(host_id, Value::Host).unwrap();
 
@@ -1053,12 +957,7 @@ mod tests {
 
         watchers.add_watcher(host_id, Value::Host).unwrap();
         watchers
-            .add_watcher(
-                player_id,
-                Value::Player(PlayerValue::Individual {
-                    name: "Alice".to_string(),
-                }),
-            )
+            .add_watcher(player_id, Value::Player(PlayerValue::Individual))
             .unwrap();
         watchers.add_watcher(unassigned_id, Value::Unassigned).unwrap();
 
@@ -1093,12 +992,7 @@ mod tests {
 
         watchers.add_watcher(host_id, Value::Host).unwrap();
         watchers
-            .add_watcher(
-                player_id,
-                Value::Player(PlayerValue::Individual {
-                    name: "Alice".to_string(),
-                }),
-            )
+            .add_watcher(player_id, Value::Player(PlayerValue::Individual))
             .unwrap();
 
         let host_tunnel = MockTunnel::new();
@@ -1128,12 +1022,7 @@ mod tests {
 
         watchers.add_watcher(host_id, Value::Host).unwrap();
         watchers
-            .add_watcher(
-                player_id,
-                Value::Player(PlayerValue::Individual {
-                    name: "Alice".to_string(),
-                }),
-            )
+            .add_watcher(player_id, Value::Player(PlayerValue::Individual))
             .unwrap();
 
         let host_tunnel = MockTunnel::new();
@@ -1169,12 +1058,7 @@ mod tests {
 
         watchers.add_watcher(host_id, Value::Host).unwrap();
         watchers
-            .add_watcher(
-                player_id,
-                Value::Player(PlayerValue::Individual {
-                    name: "Alice".to_string(),
-                }),
-            )
+            .add_watcher(player_id, Value::Player(PlayerValue::Individual))
             .unwrap();
 
         // Serialize
