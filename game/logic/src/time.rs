@@ -2,20 +2,21 @@
 //!
 //! [`Timestamp`] is the single timestamp type the rest of the crate works
 //! with. Its in-memory representation depends on the `serializable` Cargo
-//! feature, but the API is identical:
+//! feature and the target, but the API is identical:
 //!
 //! | Build                                         | Backing                         | Serde                                          |
 //! | --------------------------------------------- | ------------------------------- | ---------------------------------------------- |
-//! | `serializable` ON (or wasm target)            | `u64` nanos since UNIX epoch    | round-trips as a `u64`                         |
-//! | `serializable` OFF on a non-wasm target       | `std::time::Instant`            | not implemented (compile error to serialize)   |
+//! | `serializable` ON                             | `u64` nanos since UNIX epoch    | round-trips as a `u64`                         |
+//! | `serializable` OFF, native target             | `std::time::Instant`            | not implemented (compile error to serialize)   |
+//! | `serializable` OFF, wasm target               | `web_time::Instant`             | not implemented (compile error to serialize)   |
 //!
 //! `fuiz-cloudflare` enables `serializable` so `Game` round-trips through
 //! Durable Object / KV storage. The native `fuiz-server` keeps its games
 //! in-memory and runs without the feature, getting the `Instant` fast path.
 //! The benchmark harness inherits default features (no `serializable`) for
-//! the same reason. The wasm target unconditionally falls back to the `u64`
-//! backing because `Instant` semantics on wasm aren't useful across the
-//! worker boundary anyway.
+//! the same reason. On wasm without `serializable`, `web_time::Instant`
+//! bridges to `performance.now()`, since `std::time::Instant::now()` panics
+//! on `wasm32-unknown-unknown`.
 //!
 //! When the feature is off, the `Instant`-backed `Timestamp` does not impl
 //! `Serialize` / `Deserialize` at all. Game-state types that hold `Timestamp`
@@ -25,13 +26,16 @@
 
 pub use std::time::Duration;
 
-#[cfg(any(feature = "serializable", target_family = "wasm"))]
+#[cfg(feature = "serializable")]
 pub use serializable_backing::Timestamp;
 
-#[cfg(not(any(feature = "serializable", target_family = "wasm")))]
+#[cfg(all(not(feature = "serializable"), not(target_family = "wasm")))]
 pub use instant_backing::Timestamp;
 
-#[cfg(any(feature = "serializable", target_family = "wasm"))]
+#[cfg(all(not(feature = "serializable"), target_family = "wasm"))]
+pub use web_time_backing::Timestamp;
+
+#[cfg(feature = "serializable")]
 mod serializable_backing {
     use serde::{Deserialize, Serialize};
 
@@ -87,7 +91,7 @@ mod serializable_backing {
     }
 }
 
-#[cfg(not(any(feature = "serializable", target_family = "wasm")))]
+#[cfg(all(not(feature = "serializable"), not(target_family = "wasm")))]
 mod instant_backing {
     use std::time::Instant;
 
@@ -103,6 +107,41 @@ mod instant_backing {
 
     impl Timestamp {
         /// Current monotonic instant.
+        #[inline]
+        pub fn now() -> Self {
+            Self(Instant::now())
+        }
+
+        /// `self - earlier`, saturating at zero.
+        #[inline]
+        pub fn duration_since(self, earlier: Self) -> Duration {
+            self.0.saturating_duration_since(earlier.0)
+        }
+
+        /// `Self::now().duration_since(self)`.
+        #[inline]
+        pub fn elapsed(self) -> Duration {
+            self.0.elapsed()
+        }
+    }
+}
+
+#[cfg(all(not(feature = "serializable"), target_family = "wasm"))]
+mod web_time_backing {
+    use web_time::Instant;
+
+    use super::Duration;
+
+    /// Wall-clock-shaped timestamp, backed by `web_time::Instant` (which
+    /// bridges to `performance.now()` on `wasm32-unknown-unknown` where
+    /// `std::time::Instant::now()` would panic). Deliberately *not*
+    /// `Serialize` / `Deserialize` — same compile-time gate as the native
+    /// `Instant` backing.
+    #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub struct Timestamp(Instant);
+
+    impl Timestamp {
+        /// Current monotonic instant via `performance.now()`.
         #[inline]
         pub fn now() -> Self {
             Self(Instant::now())
@@ -151,7 +190,7 @@ mod tests {
         assert_eq!(later.duration_since(earlier_after), Duration::ZERO);
     }
 
-    #[cfg(any(feature = "serializable", target_family = "wasm"))]
+    #[cfg(feature = "serializable")]
     #[test]
     fn timestamp_serde_roundtrip() {
         let t = Timestamp::from_nanos_since_epoch(123_456_789);
