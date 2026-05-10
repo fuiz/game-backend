@@ -11,7 +11,7 @@ use std::{
 };
 
 use itertools::Itertools;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxBuildHasher, FxHashMap};
 use serde::{Deserialize, Serialize};
 use web_time::SystemTime;
 
@@ -221,7 +221,7 @@ pub(crate) fn add_scores_to_leaderboard<
     // distinct group, and the answer set bounds that. Avoids 0→N rawtable
     // rehashes (the old default-sized map cost ~3% of full_game at 4000).
     let mut earliest_per_group: FxHashMap<Id, (u64, SystemTime)> =
-        FxHashMap::with_capacity_and_hasher(slide.user_answers().len(), Default::default());
+        FxHashMap::with_capacity_and_hasher(slide.user_answers().len(), FxBuildHasher);
     for (id, (answer, instant)) in slide.user_answers() {
         let multiplier = slide.score_multiplier(answer);
         let time_score = calculate_slide_score(
