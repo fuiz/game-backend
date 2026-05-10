@@ -418,7 +418,7 @@ impl DurableObject for Game {
         self.load_state().await;
 
         self.with_mut_game_update_storage(|game| {
-            game.watcher_left(watcher_id);
+            game.watcher_left(watcher_id, self.tunnel_finder());
         })
         .await?;
 

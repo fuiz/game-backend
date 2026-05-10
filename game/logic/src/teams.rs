@@ -122,8 +122,7 @@ impl<N: names::NamingScheme> TeamManager<N> {
 
     fn get_players<F: TunnelFinder>(watchers: &Watchers, tunnel_finder: F) -> Vec<Id> {
         watchers
-            .specific_vec(watcher::ValueKind::Player, tunnel_finder)
-            .into_iter()
+            .specific_iter(watcher::ValueKind::Player, tunnel_finder)
             .map(|(id, _, _)| id)
             .collect_vec()
     }

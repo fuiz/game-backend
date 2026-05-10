@@ -183,22 +183,22 @@ mod tests {
 
     #[test]
     fn test_sync_message_to_message() {
-        let players = TruncatedVec::new(["Player1", "Player2"].into_iter(), 10, 2);
+        let players = TruncatedVec::new(["Player1", "Player2"].into_iter(), 2, 2);
         let sync_msg = SyncMessage::Game(crate::game::SyncMessage::WaitingScreen(players));
         let json_str = serde_json::to_string(&sync_msg).expect("default serializer cannot fail");
 
         assert!(json_str.contains("Game"));
         assert!(json_str.contains("WaitingScreen"));
+        assert!(json_str.contains("Player1"));
     }
 
     #[test]
     fn test_update_message_to_message() {
-        let players = TruncatedVec::new(["Player1"].into_iter(), 10, 1);
-        let update_msg = UpdateMessage::Game(crate::game::UpdateMessage::WaitingScreen(players));
+        let update_msg = UpdateMessage::Game(crate::game::UpdateMessage::PlayerJoined("Player1"));
         let json_str = serde_json::to_string(&update_msg).expect("default serializer cannot fail");
 
         assert!(json_str.contains("Game"));
-        assert!(json_str.contains("WaitingScreen"));
+        assert!(json_str.contains("PlayerJoined"));
         assert!(json_str.contains("Player1"));
     }
 }

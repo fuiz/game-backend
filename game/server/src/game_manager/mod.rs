@@ -139,7 +139,7 @@ impl GameManager {
 
     pub fn watcher_left(&self, game_id: GameId, watcher_id: Id) -> Result<(), GameVanish> {
         self.with_game_mut(game_id, |game| {
-            game.watcher_left(watcher_id);
+            game.watcher_left(watcher_id, |id| self.tunnel_finder(id));
         })
     }
 

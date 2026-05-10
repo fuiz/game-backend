@@ -284,30 +284,10 @@ impl Watchers {
             .filter_map(move |(id, kind)| tunnel_finder(id).map(|t| (id, t, kind)))
     }
 
-    /// Gets a vector of participants of a specific type with their tunnels and values
-    ///
-    /// # Arguments
-    ///
-    /// * `filter` - The type of participants to include
-    /// * `tunnel_finder` - Function to retrieve the tunnel for a given ID
-    ///
-    /// # Returns
-    ///
-    /// Vector of tuples containing (ID, Tunnel, Value) for participants
-    /// of the specified type with active tunnels
-    pub fn specific_vec<F: TunnelFinder>(&self, filter: ValueKind, tunnel_finder: F) -> Vec<(Id, F::Tunnel, Value)> {
-        self.specific_iter(filter, tunnel_finder)
-            .map(|(id, t, v)| (id, t, v.to_owned()))
-            .collect_vec()
-    }
-
     /// Lazy iterator over participants of a specific type with active tunnels.
     ///
-    /// Like [`Self::specific_vec`] but doesn't eagerly collect or clone, so
-    /// callers that only need a prefix (e.g. via `.take(N)`) can avoid the
-    /// per-watcher work for the rest of the set. Yields entries in insertion
-    /// order; the iterator is double-ended so callers (e.g. the waiting screen)
-    /// can `.rev()` for most-recent-first.
+    /// Yields entries in insertion order; the iterator is double-ended so
+    /// callers can `.rev()` for most-recent-first.
     pub fn specific_iter<F: TunnelFinder>(
         &self,
         filter: ValueKind,
@@ -582,7 +562,7 @@ impl Watchers {
         message: &super::UpdateMessage<'_>,
         tunnel_finder: F,
     ) {
-        for (_, session, _) in self.specific_vec(filter, tunnel_finder) {
+        for (_, session, _) in self.specific_iter(filter, tunnel_finder) {
             session.send_message(message);
         }
     }
@@ -868,53 +848,15 @@ mod tests {
     }
 
     #[test]
-    fn test_specific_vec() {
+    fn test_specific_iter() {
         let mut watchers = Watchers::new(1000);
         let mut tunnels = HashMap::new();
 
         let host_id = Id::new();
-        let player_id = Id::new();
-        let unassigned_id = Id::new();
-
-        watchers.add_watcher(host_id, Value::Host).unwrap();
-        watchers
-            .add_watcher(
-                player_id,
-                Value::Player(PlayerValue::Individual {
-                    name: "Alice".to_string(),
-                }),
-            )
-            .unwrap();
-        watchers.add_watcher(unassigned_id, Value::Unassigned).unwrap();
-
-        // Add tunnels for all
-        tunnels.insert(host_id, MockTunnel::new());
-        tunnels.insert(player_id, MockTunnel::new());
-        tunnels.insert(unassigned_id, MockTunnel::new());
-
-        let tunnel_finder = |id: Id| tunnels.get(&id).cloned();
-
-        // Test filtering by ValueKind::Player
-        let players_vec = watchers.specific_vec(ValueKind::Player, tunnel_finder);
-        assert_eq!(players_vec.len(), 1);
-        assert_eq!(players_vec[0].0, player_id);
-
-        // Test filtering by ValueKind::Host
-        let hosts_vec = watchers.specific_vec(ValueKind::Host, tunnel_finder);
-        assert_eq!(hosts_vec.len(), 1);
-        assert_eq!(hosts_vec[0].0, host_id);
-    }
-
-    #[test]
-    fn test_specific_vec_with_missing_tunnels() {
-        let mut watchers = Watchers::new(1000);
-        let mut tunnels = HashMap::new();
-
         let player1_id = Id::new();
         let player2_id = Id::new();
-        let player3_id = Id::new();
 
-        // Add three players
+        watchers.add_watcher(host_id, Value::Host).unwrap();
         watchers
             .add_watcher(
                 player1_id,
@@ -931,29 +873,24 @@ mod tests {
                 }),
             )
             .unwrap();
-        watchers
-            .add_watcher(
-                player3_id,
-                Value::Player(PlayerValue::Individual {
-                    name: "Charlie".to_string(),
-                }),
-            )
-            .unwrap();
 
-        // Only add tunnels for player1 and player3 (player2 has no tunnel)
+        // Tunnel for host + player1, not for player2 — so player2 is filtered.
+        tunnels.insert(host_id, MockTunnel::new());
         tunnels.insert(player1_id, MockTunnel::new());
-        tunnels.insert(player3_id, MockTunnel::new());
 
         let tunnel_finder = |id: Id| tunnels.get(&id).cloned();
 
-        // Test specific_vec - should only include players with tunnels
-        let players_vec = watchers.specific_vec(ValueKind::Player, tunnel_finder);
-        assert_eq!(players_vec.len(), 2);
+        let players: Vec<_> = watchers
+            .specific_iter(ValueKind::Player, tunnel_finder)
+            .map(|(id, _, _)| id)
+            .collect();
+        assert_eq!(players, vec![player1_id]);
 
-        let returned_ids: HashSet<Id> = players_vec.iter().map(|(id, _, _)| *id).collect();
-        assert!(returned_ids.contains(&player1_id));
-        assert!(!returned_ids.contains(&player2_id)); // No tunnel
-        assert!(returned_ids.contains(&player3_id));
+        let hosts: Vec<_> = watchers
+            .specific_iter(ValueKind::Host, tunnel_finder)
+            .map(|(id, _, _)| id)
+            .collect();
+        assert_eq!(hosts, vec![host_id]);
     }
 
     #[test]

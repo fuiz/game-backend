@@ -238,8 +238,11 @@ pub enum IncomingHostMessage {
 pub enum UpdateMessage<'a> {
     /// Assign a unique ID to a participant
     IdAssign(Id),
-    /// Update the waiting screen with current players
-    WaitingScreen(TruncatedVec<&'a str>),
+    /// A player joined the waiting screen — host-only incremental event.
+    /// Replaces the prior full-list `WaitingScreen` push.
+    PlayerJoined(&'a str),
+    /// A player left the waiting screen — host-only incremental event.
+    PlayerLeft(&'a str),
     /// Update the team display screen
     TeamDisplay(TruncatedVec<&'a str>),
     /// Prompt the participant to choose a name
@@ -277,7 +280,10 @@ pub enum UpdateMessage<'a> {
 /// needs to be completely synchronized with the current game state.
 #[derive(Debug, Serialize, Clone)]
 pub enum SyncMessage<'a> {
-    /// Sync waiting screen with current players
+    /// Sync waiting screen — `items` holds the full player-name list for the
+    /// host (no server-side truncation; client decides display), and is empty
+    /// for non-host roles (which only need `exact_count`). Incremental updates
+    /// flow via [`UpdateMessage::PlayerJoined`] / [`UpdateMessage::PlayerLeft`].
     WaitingScreen(TruncatedVec<&'a str>),
     /// Sync team display screen
     TeamDisplay(TruncatedVec<&'a str>),
@@ -455,56 +461,36 @@ impl Game {
             max_selection: team_manager.optimal_size,
             available: self
                 .watchers
-                .specific_vec(ValueKind::Player, tunnel_finder)
-                .into_iter()
-                .filter_map(|(id, _, _)| Some((id, self.watchers.get_name(id)?)))
-                .map(|(id, name)| (name, pref.contains(&id)))
+                .specific_iter(ValueKind::Player, tunnel_finder)
+                .filter_map(|(id, _, value)| match value {
+                    Value::Player(player_value) => Some((player_value.name(), pref.contains(&id))),
+                    _ => None,
+                })
                 .collect(),
         }
     }
 
-    /// Generates a list of player names for the waiting screen
+    /// `TruncatedVec` shape used for [`SyncMessage::WaitingScreen`].
     ///
-    /// Creates a truncated list of player names to display on the waiting
-    /// screen or team display. In team games, may show team names instead
-    /// of individual player names depending on the current game state.
-    ///
-    /// # Arguments
-    ///
-    /// * `tunnel_finder` - Function to find active communication tunnels
-    ///
-    /// # Returns
-    ///
-    /// A `TruncatedVec` containing player names with overflow information
-    ///
-    /// # Type Parameters
-    ///
-    /// * `T` - Type implementing the Tunnel trait for participant communication
-    /// * `F` - Function type for finding tunnels by participant ID
-    fn waiting_screen_names<F: TunnelFinder>(&self, tunnel_finder: F) -> TruncatedVec<&str> {
-        const LIMIT: usize = 50;
-
-        if let Some(team_manager) = &self.team_manager
-            && matches!(self.state, State::TeamDisplay)
-        {
-            return team_manager.team_names().unwrap_or_default();
+    /// `items` is the full player-name list when `include_names` is true (host
+    /// sync), or empty when false (player/unassigned sync — those clients only
+    /// read `exact_count`). Either way, this is only called on rare state
+    /// syncs; per-join updates flow as `PlayerJoined` / `PlayerLeft` events.
+    fn waiting_screen_names<F: TunnelFinder>(&self, tunnel_finder: F, include_names: bool) -> TruncatedVec<&str> {
+        let exact_count = self.watchers.specific_count(ValueKind::Player);
+        if !include_names {
+            return TruncatedVec::new(std::iter::empty(), 0, exact_count);
         }
-
-        // Names are already unique (enforced by `Names::set_name`), so we can
-        // skip `.unique()` and avoid the per-call HashSet of seen names.
-        // Iterate most-recent-first so the waiting screen surfaces the latest
-        // joiners; `Watchers::specific_iter` walks an `IndexSet` in insertion
-        // order, so `.rev()` here yields the most recent `LIMIT` entries.
-        let player_names = self
-            .watchers
-            .specific_iter(ValueKind::Player, tunnel_finder)
-            .rev()
-            .filter_map(|(_, _, x)| match x {
-                Value::Player(player_value) => Some(player_value.name()),
-                _ => None,
-            });
-
-        TruncatedVec::new(player_names, LIMIT, self.watchers.specific_count(ValueKind::Player))
+        TruncatedVec::new(
+            self.watchers
+                .specific_iter(ValueKind::Player, tunnel_finder)
+                .filter_map(|(_, _, value)| match value {
+                    Value::Player(player_value) => Some(player_value.name()),
+                    _ => None,
+                }),
+            exact_count,
+            exact_count,
+        )
     }
 
     /// Creates a leaderboard message with current and previous standings
@@ -938,7 +924,7 @@ impl Game {
 
                 self.watchers.announce_specific(
                     ValueKind::Host,
-                    &UpdateMessage::WaitingScreen(self.waiting_screen_names(&tunnel_finder)).into(),
+                    &UpdateMessage::PlayerJoined(name).into(),
                     &tunnel_finder,
                 );
             }
@@ -1192,15 +1178,22 @@ impl Game {
                         max_selection: team_manager.optimal_size,
                         available: self
                             .watchers
-                            .specific_vec(ValueKind::Player, tunnel_finder)
-                            .into_iter()
-                            .filter_map(|(id, _, _)| Some((id, self.watchers.get_name(id)?)))
-                            .map(|(id, name)| (name, pref.contains(&id)))
+                            .specific_iter(ValueKind::Player, tunnel_finder)
+                            .filter_map(|(id, _, value)| match value {
+                                Value::Player(player_value) => Some((player_value.name(), pref.contains(&id))),
+                                _ => None,
+                            })
                             .collect(),
                     }
                     .into()
                 }
-                _ => SyncMessage::WaitingScreen(self.waiting_screen_names(tunnel_finder)).into(),
+                _ => SyncMessage::WaitingScreen(
+                    // `include_names` is true only for the host; player /
+                    // unassigned syncs return an empty `items` with the live
+                    // `exact_count` so existing player UIs keep working.
+                    self.waiting_screen_names(tunnel_finder, matches!(watcher_kind, ValueKind::Host)),
+                )
+                .into(),
             },
             State::TeamDisplay => match watcher_kind {
                 ValueKind::Player => {
@@ -1282,12 +1275,21 @@ impl Game {
     /// answer tally so subsequent O(1) "all answered" checks stay correct.
     /// The watcher's role is preserved in `mapping` so they can reconnect via
     /// [`Self::update_session`].
-    pub fn watcher_left(&mut self, watcher_id: Id) {
+    pub fn watcher_left<F: TunnelFinder>(&mut self, watcher_id: Id, tunnel_finder: F) {
         let kind = self.watchers.get_watcher_value_ref(watcher_id).map(Value::kind);
-        if matches!(kind, Some(ValueKind::Player))
-            && let State::Slide(current_slide) = &mut self.state
-        {
-            current_slide.state.mark_watcher_left(watcher_id);
+        if matches!(kind, Some(ValueKind::Player)) {
+            if let State::Slide(current_slide) = &mut self.state {
+                current_slide.state.mark_watcher_left(watcher_id);
+            }
+            if matches!(self.state, State::WaitingScreen)
+                && let Some(name) = self.watchers.get_name(watcher_id)
+            {
+                self.watchers.announce_specific(
+                    ValueKind::Host,
+                    &UpdateMessage::PlayerLeft(name).into(),
+                    &tunnel_finder,
+                );
+            }
         }
         self.watchers.watcher_left(watcher_id);
     }
@@ -1349,14 +1351,22 @@ impl Game {
                 {
                     Watchers::send_message(&UpdateMessage::FindTeam(team_name).into(), watcher_id, &tunnel_finder);
                 }
+                let player_name = player_value.name().to_owned();
                 Watchers::send_message(
-                    &UpdateMessage::NameAssign(player_value.name()).into(),
+                    &UpdateMessage::NameAssign(&player_name).into(),
                     watcher_id,
                     &tunnel_finder,
                 );
+                if matches!(self.state, State::WaitingScreen) {
+                    self.watchers.announce_specific(
+                        ValueKind::Host,
+                        &UpdateMessage::PlayerJoined(&player_name).into(),
+                        &tunnel_finder,
+                    );
+                }
                 self.update_player_with_options(watcher_id, &tunnel_finder);
                 Watchers::send_state(
-                    &self.state_message(watcher_id, watcher_value.kind(), &tunnel_finder),
+                    &self.state_message(watcher_id, ValueKind::Player, &tunnel_finder),
                     watcher_id,
                     &tunnel_finder,
                 );
@@ -2172,31 +2182,6 @@ mod tests {
 
         // Update session - should do nothing since locked and unassigned
         game.update_session(unassigned_id, tunnel_finder);
-    }
-
-    #[test]
-    fn test_game_waiting_screen_names_team_display() {
-        // Create a game with team manager in TeamDisplay state
-        let fuiz = create_test_fuiz();
-        let team_options = TeamOptions {
-            size: 2,
-            assign_random: false,
-        };
-        let options = Options {
-            teams: Some(team_options),
-            ..Default::default()
-        };
-        let host_id = crate::watcher::Id::new();
-        let mut game = Game::new(fuiz, options, host_id, &test_settings());
-
-        // Set state to TeamDisplay
-        game.state = State::TeamDisplay;
-
-        let tunnel_finder = |_: crate::watcher::Id| None::<MockTunnel>;
-
-        // Should use team names when in TeamDisplay state with team manager
-        let names = game.waiting_screen_names(tunnel_finder);
-        assert!(names.items.is_empty()); // No teams yet
     }
 
     #[test]
@@ -3086,10 +3071,11 @@ mod tests {
         assert!(game.assign_player_name(player1, "Player1", tunnel_finder).is_ok());
         assert!(game.assign_player_name(player2, "Player2", tunnel_finder).is_ok());
 
-        let names = game.waiting_screen_names(tunnel_finder);
-        assert_eq!(names.items.len(), 2);
-        assert!(names.items.contains(&"Player1"));
-        assert!(names.items.contains(&"Player2"));
+        let names = game.waiting_screen_names(tunnel_finder, true);
+        assert_eq!(names.exact_count(), 2);
+        assert_eq!(names.items().len(), 2);
+        assert!(names.items().contains(&"Player1"));
+        assert!(names.items().contains(&"Player2"));
     }
 
     #[test]

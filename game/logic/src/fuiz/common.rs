@@ -259,9 +259,8 @@ pub(crate) fn add_scores_to_leaderboard<
     let all_ids = match &team_manager {
         Some(team_manager) => team_manager.all_ids(),
         None => watchers
-            .specific_vec(ValueKind::Player, tunnel_finder)
-            .into_iter()
-            .map(|(x, _, _)| x)
+            .specific_iter(ValueKind::Player, tunnel_finder)
+            .map(|(id, _, _)| id)
             .collect_vec(),
     };
     for id in all_ids {
