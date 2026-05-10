@@ -12,6 +12,7 @@ use std::{
 
 use garde::Validate;
 use itertools::Itertools;
+use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use serde_with::DurationMilliSeconds;
 use web_time::SystemTime;
@@ -84,7 +85,7 @@ pub struct State {
 
     // Runtime State
     /// Player text answers with submission timestamps
-    user_answers: HashMap<Id, (String, SystemTime)>,
+    user_answers: FxHashMap<Id, (String, SystemTime)>,
     /// Distinct live players who have answered. Maintained incrementally.
     #[serde(default)]
     live_answered_count: usize,
@@ -123,7 +124,7 @@ impl SlideConfig {
 
 /// Messages sent to the listeners to update their pre-existing state with the slide state
 #[derive(Debug, Serialize, Clone)]
-pub enum UpdateMessage {
+pub enum UpdateMessage<'a> {
     /// Announcement of the question without its answers
     QuestionAnnouncement {
         /// Index of the slide (0-indexing)
@@ -131,9 +132,9 @@ pub enum UpdateMessage {
         /// Total count of slides
         count: usize,
         /// Question text (i.e. what's being asked)
-        question: String,
+        question: &'a str,
         /// Accompanying media
-        media: Option<Media>,
+        media: Option<&'a Media>,
         /// Time before answers will be released, or `None` for host-paced
         #[serde(with = "serde_with::As::<Option<DurationMilliSeconds<u64>>>")]
         duration: Option<Duration>,
@@ -145,9 +146,9 @@ pub enum UpdateMessage {
     /// Results of the game including correct answers and statistics of how many they got chosen
     AnswersResults {
         /// Correct answers
-        answers: Vec<String>,
+        answers: Vec<&'a str>,
         /// Statistics of how many times each answer was chosen
-        results: Vec<(String, usize)>,
+        results: Vec<(&'a str, usize)>,
         /// Case-sensitive check for answers
         case_sensitive: bool,
     },
@@ -169,7 +170,7 @@ pub enum AlarmMessage {
 ///
 /// See [`UpdateMessage`] for explaination of these fields.
 #[derive(Debug, Serialize, Clone)]
-pub enum SyncMessage {
+pub enum SyncMessage<'a> {
     /// Announcement of the question without its answers
     QuestionAnnouncement {
         /// Index of the current slide
@@ -177,9 +178,9 @@ pub enum SyncMessage {
         /// Total number of slides in the game
         count: usize,
         /// The question text being asked
-        question: String,
+        question: &'a str,
         /// Optional media content accompanying the question
-        media: Option<Media>,
+        media: Option<&'a Media>,
         /// Remaining time for the question to be displayed without its answers, or `None` for host-paced
         #[serde(with = "serde_with::As::<Option<DurationMilliSeconds<u64>>>")]
         duration: Option<Duration>,
@@ -193,13 +194,13 @@ pub enum SyncMessage {
         /// Total number of slides in the game
         count: usize,
         /// The question text that was asked
-        question: String,
+        question: &'a str,
         /// Optional media content that accompanied the question
-        media: Option<Media>,
+        media: Option<&'a Media>,
         /// Correct answers for this question
-        answers: Vec<String>,
+        answers: Vec<&'a str>,
         /// Statistics of player submissions: (answer_text, count)
-        results: Vec<(String, usize)>,
+        results: Vec<(&'a str, usize)>,
         /// Whether the answer matching was case-sensitive
         case_sensitive: bool,
     },
@@ -247,11 +248,11 @@ impl SlideTimer for State {
 }
 
 impl AnswerHandler<String> for State {
-    fn user_answers(&self) -> &HashMap<Id, (String, SystemTime)> {
+    fn user_answers(&self) -> &FxHashMap<Id, (String, SystemTime)> {
         &self.user_answers
     }
 
-    fn user_answers_mut(&mut self) -> &mut HashMap<Id, (String, SystemTime)> {
+    fn user_answers_mut(&mut self) -> &mut FxHashMap<Id, (String, SystemTime)> {
         &mut self.user_answers
     }
 
@@ -333,8 +334,8 @@ impl State {
                 &UpdateMessage::QuestionAnnouncement {
                     index,
                     count,
-                    question: self.config.title.clone(),
-                    media: self.config.media.clone(),
+                    question: &self.config.title,
+                    media: self.config.media.as_ref(),
                     duration: self.config.introduce_question,
                     accept_answers: false,
                 }
@@ -382,8 +383,8 @@ impl State {
                 &UpdateMessage::QuestionAnnouncement {
                     index,
                     count,
-                    question: self.config.title.clone(),
-                    media: self.config.media.clone(),
+                    question: &self.config.title,
+                    media: self.config.media.as_ref(),
                     duration: self.config.time_limit,
                     accept_answers: true,
                 }
@@ -417,8 +418,14 @@ impl State {
         if self.change_state(SlideState::Answers, SlideState::AnswersResults) {
             watchers.announce(
                 &UpdateMessage::AnswersResults {
-                    answers: self.cleaned_answers.iter().cloned().collect_vec(),
-                    results: self.answer_counts().into_iter().collect_vec(),
+                    answers: self.cleaned_answers.iter().map(String::as_str).collect_vec(),
+                    results: self
+                        .user_answers
+                        .values()
+                        .map(|(a, _)| a.as_str())
+                        .counts()
+                        .into_iter()
+                        .collect_vec(),
                     case_sensitive: self.config.case_sensitive,
                 }
                 .into(),
@@ -435,31 +442,37 @@ impl State {
     ///
     /// # Returns
     /// * Appropriate sync message based on current slide state
-    pub fn state_message(&self, index: usize, count: usize) -> SyncMessage {
+    pub fn state_message(&self, index: usize, count: usize) -> SyncMessage<'_> {
         match self.state() {
             SlideState::Unstarted | SlideState::Question => SyncMessage::QuestionAnnouncement {
                 index,
                 count,
-                question: self.config.title.clone(),
-                media: self.config.media.clone(),
+                question: &self.config.title,
+                media: self.config.media.as_ref(),
                 duration: self.config.introduce_question.map(|d| d.saturating_sub(self.elapsed())),
                 accept_answers: false,
             },
             SlideState::Answers => SyncMessage::QuestionAnnouncement {
                 index,
                 count,
-                question: self.config.title.clone(),
-                media: self.config.media.clone(),
+                question: &self.config.title,
+                media: self.config.media.as_ref(),
                 duration: self.config.time_limit.map(|d| d.saturating_sub(self.elapsed())),
                 accept_answers: true,
             },
             SlideState::AnswersResults => SyncMessage::AnswersResults {
                 index,
                 count,
-                question: self.config.title.clone(),
-                media: self.config.media.clone(),
-                answers: self.cleaned_answers.iter().cloned().collect_vec(),
-                results: self.answer_counts().into_iter().collect_vec(),
+                question: &self.config.title,
+                media: self.config.media.as_ref(),
+                answers: self.cleaned_answers.iter().map(String::as_str).collect_vec(),
+                results: self
+                    .user_answers
+                    .values()
+                    .map(|(a, _)| a.as_str())
+                    .counts()
+                    .into_iter()
+                    .collect_vec(),
                 case_sensitive: self.config.case_sensitive,
             },
         }

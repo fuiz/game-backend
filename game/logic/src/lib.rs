@@ -25,15 +25,15 @@ pub mod watcher;
 /// This enum represents all possible synchronization messages that can be
 /// sent to keep game state consistent across all connected clients.
 #[derive(Debug, Serialize, Clone, derive_more::From)]
-pub enum SyncMessage {
+pub enum SyncMessage<'a> {
     /// General game synchronization messages
-    Game(game::SyncMessage),
+    Game(game::SyncMessage<'a>),
     /// Multiple choice question synchronization
-    MultipleChoice(fuiz::multiple_choice::SyncMessage),
+    MultipleChoice(fuiz::multiple_choice::SyncMessage<'a>),
     /// Type answer question synchronization
-    TypeAnswer(fuiz::type_answer::SyncMessage),
+    TypeAnswer(fuiz::type_answer::SyncMessage<'a>),
     /// Order question synchronization
-    Order(fuiz::order::SyncMessage),
+    Order(fuiz::order::SyncMessage<'a>),
 }
 
 /// Messages sent to update specific aspects of the game state
@@ -41,15 +41,15 @@ pub enum SyncMessage {
 /// Update messages are used to notify clients about changes that affect
 /// their local view of the game, such as score updates or new questions.
 #[derive(Debug, Serialize, Clone, derive_more::From)]
-pub enum UpdateMessage {
+pub enum UpdateMessage<'a> {
     /// General game update messages
-    Game(game::UpdateMessage),
+    Game(game::UpdateMessage<'a>),
     /// Multiple choice question updates
-    MultipleChoice(fuiz::multiple_choice::UpdateMessage),
+    MultipleChoice(fuiz::multiple_choice::UpdateMessage<'a>),
     /// Type answer question updates
-    TypeAnswer(fuiz::type_answer::UpdateMessage),
+    TypeAnswer(fuiz::type_answer::UpdateMessage<'a>),
     /// Order question updates
-    Order(fuiz::order::UpdateMessage),
+    Order(fuiz::order::UpdateMessage<'a>),
 }
 
 /// Alarm messages for timed events in different question types
@@ -182,7 +182,7 @@ mod tests {
 
     #[test]
     fn test_sync_message_to_message() {
-        let players = TruncatedVec::new(vec!["Player1".to_string(), "Player2".to_string()].into_iter(), 10, 2);
+        let players = TruncatedVec::new(["Player1", "Player2"].into_iter(), 10, 2);
         let sync_msg = SyncMessage::Game(crate::game::SyncMessage::WaitingScreen(players));
         let json_str = serde_json::to_string(&sync_msg).expect("default serializer cannot fail");
 
@@ -192,7 +192,7 @@ mod tests {
 
     #[test]
     fn test_update_message_to_message() {
-        let players = TruncatedVec::new(vec!["Player1".to_string()].into_iter(), 10, 1);
+        let players = TruncatedVec::new(["Player1"].into_iter(), 10, 1);
         let update_msg = UpdateMessage::Game(crate::game::UpdateMessage::WaitingScreen(players));
         let json_str = serde_json::to_string(&update_msg).expect("default serializer cannot fail");
 

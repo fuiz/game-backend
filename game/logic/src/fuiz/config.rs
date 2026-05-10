@@ -23,10 +23,11 @@ pub trait ScheduleMessageFn: FnOnce(AlarmMessage, std::time::Duration) {}
 
 impl<T: FnOnce(AlarmMessage, std::time::Duration)> ScheduleMessageFn for T {}
 
-/// Represents content that can be either text or media
+/// Represents owned content that can be either text or media.
 ///
-/// This enum allows questions and answers to include either plain text
-/// or rich media content like images, providing flexibility in question design.
+/// This is the storage form, used inside [`crate::fuiz::config::Fuiz`] and
+/// the slide configs. Outgoing messages carry the borrowed counterpart
+/// [`TextOrMediaRef`] to avoid cloning the underlying strings per recipient.
 #[derive(Debug, Serialize, Deserialize, Clone, Validate)]
 #[garde(context(crate::settings::Settings as ctx))]
 pub enum TextOrMedia {
@@ -34,6 +35,29 @@ pub enum TextOrMedia {
     Media(#[garde(skip)] Media),
     /// Plain text content with length validation
     Text(#[garde(length(max = ctx.answer_text.max_length))] String),
+}
+
+/// Borrowed view of [`TextOrMedia`] for outgoing messages.
+///
+/// Constructed via [`TextOrMedia::as_ref`]. Serialises identically to
+/// [`TextOrMedia`] (the variant tags and contents are the same), but holds
+/// references into the slide config rather than owning copies.
+#[derive(Debug, Serialize, Clone, Copy)]
+pub enum TextOrMediaRef<'a> {
+    /// Media content (images, etc.)
+    Media(&'a Media),
+    /// Plain text content
+    Text(&'a str),
+}
+
+impl TextOrMedia {
+    /// Returns a borrowed view of this value for use in outgoing messages.
+    pub fn as_ref(&self) -> TextOrMediaRef<'_> {
+        match self {
+            Self::Media(m) => TextOrMediaRef::Media(m),
+            Self::Text(t) => TextOrMediaRef::Text(t),
+        }
+    }
 }
 
 /// A complete Fuiz configuration containing all questions and settings
@@ -279,7 +303,7 @@ impl SlideState {
         tunnel_finder: F,
         index: usize,
         count: usize,
-    ) -> SyncMessage {
+    ) -> SyncMessage<'_> {
         match self {
             Self::MultipleChoice(s) => SyncMessage::MultipleChoice(s.state_message(
                 watcher_id,

@@ -11,11 +11,12 @@ mod word_list;
 use std::collections::{HashMap, HashSet, hash_map::Entry};
 
 use heck::ToTitleCase;
+use rustc_hash::FxHashMap;
 use rustrict::CensorStr;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use super::watcher::Id;
+use super::{game::Profanity, watcher::Id};
 
 /// Defines the style of automatically generated player names
 ///
@@ -80,7 +81,7 @@ impl NamingScheme for NameStyle {
 /// Serialization helper for Names struct
 #[derive(Deserialize)]
 struct NamesSerde {
-    mapping: HashMap<Id, String>,
+    mapping: FxHashMap<Id, String>,
 }
 
 /// Manages player names and their associations with player IDs
@@ -92,7 +93,7 @@ struct NamesSerde {
 #[serde(from = "NamesSerde")]
 pub struct Names {
     /// Primary mapping from player ID to name
-    mapping: HashMap<Id, String>,
+    mapping: FxHashMap<Id, String>,
 
     /// Reverse mapping from name to player ID (not serialized)
     #[serde(skip_serializing)]
@@ -154,8 +155,8 @@ impl Names {
     /// # Returns
     ///
     /// The player's name if they have one assigned, otherwise `None`
-    pub fn get_name(&self, id: &Id) -> Option<String> {
-        self.mapping.get(id).map(std::borrow::ToOwned::to_owned)
+    pub fn get_name(&self, id: &Id) -> Option<&str> {
+        self.mapping.get(id).map(String::as_str)
     }
 
     /// Retrieves the name associated with a player ID, or "Unknown" if not found
@@ -167,8 +168,8 @@ impl Names {
     /// # Returns
     ///
     /// The player's name if they have one assigned, otherwise "Unknown"
-    pub fn get_name_or_unknown(&self, id: &Id) -> String {
-        self.get_name(id).unwrap_or("Unknown".to_owned())
+    pub fn get_name_or_unknown(&self, id: &Id) -> &str {
+        self.get_name(id).unwrap_or("Unknown")
     }
 
     /// Assigns a name to a player after validation
@@ -181,6 +182,9 @@ impl Names {
     ///
     /// * `id` - The player ID to assign the name to
     /// * `name` - The requested name (will be trimmed of whitespace)
+    /// * `profanity` - When [`Profanity::Censor`], reject names that the
+    ///   rustrict profanity filter flags as inappropriate; with
+    ///   [`Profanity::Allow`] the check is skipped entirely.
     ///
     /// # Returns
     ///
@@ -194,7 +198,7 @@ impl Names {
     /// * `Error::Sinful` - Name contains inappropriate content
     /// * `Error::Used` - Name is already taken by another player
     /// * `Error::Assigned` - Player already has a name assigned
-    pub fn set_name(&mut self, id: Id, name: &str) -> Result<String, Error> {
+    pub fn set_name(&mut self, id: Id, name: &str, profanity: Profanity) -> Result<String, Error> {
         if name.len() > 30 {
             return Err(Error::TooLong);
         }
@@ -202,7 +206,7 @@ impl Names {
         if name.is_empty() {
             return Err(Error::Empty);
         }
-        if name.is_inappropriate() {
+        if matches!(profanity, Profanity::Censor) && name.is_inappropriate() {
             return Err(Error::Sinful);
         }
         if !self.existing.insert(name.to_owned()) {
@@ -242,11 +246,11 @@ mod tests {
         let mut names = Names::default();
         let id = Id::new();
 
-        let result = names.set_name(id, "TestPlayer");
+        let result = names.set_name(id, "TestPlayer", Profanity::Censor);
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "TestPlayer");
 
-        assert_eq!(names.get_name(&id), Some("TestPlayer".to_string()));
+        assert_eq!(names.get_name(&id), Some("TestPlayer"));
         assert_eq!(names.get_id("TestPlayer"), Some(id));
     }
 
@@ -256,7 +260,7 @@ mod tests {
         let id = Id::new();
 
         let long_name = "a".repeat(31);
-        let result = names.set_name(id, &long_name);
+        let result = names.set_name(id, &long_name, Profanity::Censor);
         assert_eq!(result, Err(Error::TooLong));
     }
 
@@ -266,7 +270,7 @@ mod tests {
         let id = Id::new();
 
         let max_name = "a".repeat(30);
-        let result = names.set_name(id, &max_name);
+        let result = names.set_name(id, &max_name, Profanity::Censor);
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), max_name);
     }
@@ -276,9 +280,9 @@ mod tests {
         let mut names = Names::default();
         let id = Id::new();
 
-        assert_eq!(names.set_name(id, ""), Err(Error::Empty));
-        assert_eq!(names.set_name(id, "   "), Err(Error::Empty));
-        assert_eq!(names.set_name(id, "\t\n"), Err(Error::Empty));
+        assert_eq!(names.set_name(id, "", Profanity::Censor), Err(Error::Empty));
+        assert_eq!(names.set_name(id, "   ", Profanity::Censor), Err(Error::Empty));
+        assert_eq!(names.set_name(id, "\t\n", Profanity::Censor), Err(Error::Empty));
     }
 
     #[test]
@@ -286,11 +290,11 @@ mod tests {
         let mut names = Names::default();
         let id = Id::new();
 
-        let result = names.set_name(id, "  TestPlayer  ");
+        let result = names.set_name(id, "  TestPlayer  ", Profanity::Censor);
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "TestPlayer");
 
-        assert_eq!(names.get_name(&id), Some("TestPlayer".to_string()));
+        assert_eq!(names.get_name(&id), Some("TestPlayer"));
     }
 
     #[test]
@@ -300,12 +304,12 @@ mod tests {
         let id2 = Id::new();
         let id3 = Id::new();
 
-        names.set_name(id1, "Player").unwrap();
-        let result = names.set_name(id2, "Player");
+        names.set_name(id1, "Player", Profanity::Censor).unwrap();
+        let result = names.set_name(id2, "Player", Profanity::Censor);
         assert_eq!(result, Err(Error::Used));
 
         // Test that whitespace-trimmed names are also considered duplicates
-        let result_with_whitespace = names.set_name(id3, "  Player  ");
+        let result_with_whitespace = names.set_name(id3, "  Player  ", Profanity::Censor);
         assert_eq!(result_with_whitespace, Err(Error::Used));
     }
 
@@ -314,12 +318,12 @@ mod tests {
         let mut names = Names::default();
         let id = Id::new();
 
-        names.set_name(id, "FirstName").unwrap();
-        let result = names.set_name(id, "SecondName");
+        names.set_name(id, "FirstName", Profanity::Censor).unwrap();
+        let result = names.set_name(id, "SecondName", Profanity::Censor);
         assert_eq!(result, Err(Error::Assigned));
 
         // Original name should still be there
-        assert_eq!(names.get_name(&id), Some("FirstName".to_string()));
+        assert_eq!(names.get_name(&id), Some("FirstName"));
     }
 
     #[test]
@@ -331,7 +335,7 @@ mod tests {
         let inappropriate_names = ["damn", "fuck", "shit"];
 
         for name in inappropriate_names {
-            let result = names.set_name(id, name);
+            let result = names.set_name(id, name, Profanity::Censor);
             assert_eq!(
                 result,
                 Err(Error::Sinful),
@@ -355,8 +359,8 @@ mod tests {
         let id1 = Id::new();
         let id2 = Id::new();
 
-        original.set_name(id1, "Player1").unwrap();
-        original.set_name(id2, "Player2").unwrap();
+        original.set_name(id1, "Player1", Profanity::Censor).unwrap();
+        original.set_name(id2, "Player2", Profanity::Censor).unwrap();
 
         // Serialize
         let serialized = serde_json::to_string(&original).unwrap();
@@ -365,8 +369,8 @@ mod tests {
         let deserialized: Names = serde_json::from_str(&serialized).unwrap();
 
         // Check that all data is preserved
-        assert_eq!(deserialized.get_name(&id1), Some("Player1".to_string()));
-        assert_eq!(deserialized.get_name(&id2), Some("Player2".to_string()));
+        assert_eq!(deserialized.get_name(&id1), Some("Player1"));
+        assert_eq!(deserialized.get_name(&id2), Some("Player2"));
         assert_eq!(deserialized.get_id("Player1"), Some(id1));
         assert_eq!(deserialized.get_id("Player2"), Some(id2));
     }
@@ -375,7 +379,7 @@ mod tests {
     fn test_names_reverse_mapping_rebuild() {
         let mut original = Names::default();
         let id = Id::new();
-        original.set_name(id, "TestPlayer").unwrap();
+        original.set_name(id, "TestPlayer", Profanity::Censor).unwrap();
 
         // Serialize and deserialize to test reverse mapping rebuild
         let serialized = serde_json::to_string(&original).unwrap();
@@ -387,7 +391,7 @@ mod tests {
         // Test that duplicate detection still works
         let mut names = deserialized;
         let new_id = Id::new();
-        let result = names.set_name(new_id, "TestPlayer");
+        let result = names.set_name(new_id, "TestPlayer", Profanity::Censor);
         assert_eq!(result, Err(Error::Used));
     }
 
@@ -406,10 +410,10 @@ mod tests {
         let id1 = Id::new();
         let id2 = Id::new();
 
-        names.set_name(id1, "Player").unwrap();
+        names.set_name(id1, "Player", Profanity::Censor).unwrap();
 
         // Different case should be allowed
-        let result = names.set_name(id2, "player");
+        let result = names.set_name(id2, "player", Profanity::Censor);
         assert!(result.is_ok());
 
         assert_eq!(names.get_id("Player"), Some(id1));
@@ -422,11 +426,11 @@ mod tests {
         let id = Id::new();
 
         let unicode_name = "Плеер测试🎮";
-        let result = names.set_name(id, unicode_name);
+        let result = names.set_name(id, unicode_name, Profanity::Censor);
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), unicode_name);
 
-        assert_eq!(names.get_name(&id), Some(unicode_name.to_string()));
+        assert_eq!(names.get_name(&id), Some(unicode_name));
         assert_eq!(names.get_id(unicode_name), Some(id));
     }
 

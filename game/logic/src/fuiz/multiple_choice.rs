@@ -9,6 +9,7 @@ use std::{collections::HashMap, time::Duration};
 
 use garde::Validate;
 use itertools::Itertools;
+use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use serde_with::DurationMilliSeconds;
 use web_time::SystemTime;
@@ -27,7 +28,7 @@ use super::{
         AnswerHandler, QuestionReceiveMessage, SlideStateManager, SlideTimer, add_scores_to_leaderboard,
         all_players_answered, get_answered_count,
     },
-    config::TextOrMedia,
+    config::{TextOrMedia, TextOrMediaRef},
     media::Media,
 };
 
@@ -93,7 +94,7 @@ pub struct State {
 
     // Runtime State
     /// Stores player answers along with the timestamp when they were submitted
-    user_answers: HashMap<Id, (Vec<usize>, SystemTime)>,
+    user_answers: FxHashMap<Id, (Vec<usize>, SystemTime)>,
     /// Distinct live players who have answered. Maintained incrementally by
     /// [`AnswerHandler::record_answer`], [`AnswerHandler::mark_watcher_left`],
     /// and [`AnswerHandler::mark_watcher_returned`].
@@ -117,7 +118,7 @@ impl SlideConfig {
     pub fn to_state(&self) -> State {
         State {
             config: self.clone(),
-            user_answers: HashMap::new(),
+            user_answers: FxHashMap::default(),
             live_answered_count: 0,
             answer_start: None,
             state: SlideState::Unstarted,
@@ -143,7 +144,7 @@ pub enum PossiblyHidden<T> {
 /// such as when new phases begin or when results become available.
 /// They are sent to participants who already have some context about the slide.
 #[derive(Debug, Serialize, Clone)]
-pub enum UpdateMessage {
+pub enum UpdateMessage<'a> {
     /// Announces the question without revealing answer options
     QuestionAnnouncement {
         /// Index of the current slide (0-based)
@@ -151,9 +152,9 @@ pub enum UpdateMessage {
         /// Total number of slides in the game
         count: usize,
         /// The question text being asked
-        question: String,
+        question: &'a str,
         /// Optional media content accompanying the question
-        media: Option<Media>,
+        media: Option<&'a Media>,
         /// Duration before answer options will be revealed, or `None` for host-paced
         #[serde(with = "serde_with::As::<Option<DurationMilliSeconds<u64>>>")]
         duration: Option<Duration>,
@@ -164,7 +165,7 @@ pub enum UpdateMessage {
         #[serde(with = "serde_with::As::<Option<DurationMilliSeconds<u64>>>")]
         duration: Option<Duration>,
         /// Answer options (may be hidden from some participants)
-        answers: Vec<PossiblyHidden<TextOrMedia>>,
+        answers: Vec<PossiblyHidden<TextOrMediaRef<'a>>>,
         /// Whether the question accepts single or multiple answer selections
         answer_mode: AnswerMode,
     },
@@ -173,7 +174,7 @@ pub enum UpdateMessage {
     /// Shows the results with correct answers and response statistics
     AnswersResults {
         /// All answer options for the question
-        answers: Vec<TextOrMedia>,
+        answers: Vec<TextOrMediaRef<'a>>,
         /// Results showing correctness and selection statistics
         results: Vec<AnswerChoiceResult>,
     },
@@ -201,7 +202,7 @@ pub enum AlarmMessage {
 /// their view with the current state. Similar to UpdateMessage but includes
 /// additional context needed for synchronization.
 #[derive(Debug, Serialize, Clone)]
-pub enum SyncMessage {
+pub enum SyncMessage<'a> {
     /// Synchronizes the question announcement phase
     QuestionAnnouncement {
         /// Index of the current slide
@@ -209,9 +210,9 @@ pub enum SyncMessage {
         /// Total number of slides in the game
         count: usize,
         /// The question text being asked
-        question: String,
+        question: &'a str,
         /// Optional media content accompanying the question
-        media: Option<Media>,
+        media: Option<&'a Media>,
         /// Remaining time before answer options will be revealed, or `None` for host-paced
         #[serde(with = "serde_with::As::<Option<DurationMilliSeconds<u64>>>")]
         duration: Option<Duration>,
@@ -223,14 +224,14 @@ pub enum SyncMessage {
         /// Total number of slides in the game
         count: usize,
         /// The question text being asked
-        question: String,
+        question: &'a str,
         /// Optional media content accompanying the question
-        media: Option<Media>,
+        media: Option<&'a Media>,
         /// Remaining time before the answering phase ends, or `None` for host-paced
         #[serde(with = "serde_with::As::<Option<DurationMilliSeconds<u64>>>")]
         duration: Option<Duration>,
         /// Answer options (may be hidden from some participants)
-        answers: Vec<PossiblyHidden<TextOrMedia>>,
+        answers: Vec<PossiblyHidden<TextOrMediaRef<'a>>>,
         /// Number of players who have already answered
         answered_count: usize,
         /// Whether the question accepts single or multiple answer selections
@@ -243,11 +244,11 @@ pub enum SyncMessage {
         /// Total number of slides in the game
         count: usize,
         /// The question text that was asked
-        question: String,
+        question: &'a str,
         /// Optional media content that accompanied the question
-        media: Option<Media>,
+        media: Option<&'a Media>,
         /// All answer options for the question
-        answers: Vec<TextOrMedia>,
+        answers: Vec<TextOrMediaRef<'a>>,
         /// Results showing correctness and selection statistics
         results: Vec<AnswerChoiceResult>,
     },
@@ -303,11 +304,11 @@ impl SlideTimer for State {
 }
 
 impl AnswerHandler<Vec<usize>> for State {
-    fn user_answers(&self) -> &HashMap<Id, (Vec<usize>, SystemTime)> {
+    fn user_answers(&self) -> &FxHashMap<Id, (Vec<usize>, SystemTime)> {
         &self.user_answers
     }
 
-    fn user_answers_mut(&mut self) -> &mut HashMap<Id, (Vec<usize>, SystemTime)> {
+    fn user_answers_mut(&mut self) -> &mut FxHashMap<Id, (Vec<usize>, SystemTime)> {
         &mut self.user_answers
     }
 
@@ -452,8 +453,8 @@ impl State {
                 &UpdateMessage::QuestionAnnouncement {
                     index,
                     count,
-                    question: self.config.title.clone(),
-                    media: self.config.media.clone(),
+                    question: &self.config.title,
+                    media: self.config.media.as_ref(),
                     duration: self.config.introduce_question,
                 }
                 .into(),
@@ -562,7 +563,7 @@ impl State {
             let answer_count = self.per_index_answer_counts();
             watchers.announce(
                 &UpdateMessage::AnswersResults {
-                    answers: self.config.answers.iter().map(|a| a.content.clone()).collect_vec(),
+                    answers: self.config.answers.iter().map(|a| a.content.as_ref()).collect_vec(),
                     results: self
                         .config
                         .answers
@@ -604,7 +605,7 @@ impl State {
         team_size: usize,
         team_index: usize,
         is_team: bool,
-    ) -> Vec<PossiblyHidden<TextOrMedia>> {
+    ) -> Vec<PossiblyHidden<TextOrMediaRef<'_>>> {
         match watcher_kind {
             ValueKind::Host | ValueKind::Unassigned => {
                 if is_team {
@@ -613,7 +614,7 @@ impl State {
                     self.config
                         .answers
                         .iter()
-                        .map(|answer_choice| PossiblyHidden::Visible(answer_choice.content.clone()))
+                        .map(|answer_choice| PossiblyHidden::Visible(answer_choice.content.as_ref()))
                         .collect_vec()
                 }
             }
@@ -628,7 +629,7 @@ impl State {
                         .enumerate()
                         .map(|(answer_index, answer_choice)| {
                             if answer_index % team_size == adjusted_team_index {
-                                PossiblyHidden::Visible(answer_choice.content.clone())
+                                PossiblyHidden::Visible(answer_choice.content.as_ref())
                             } else {
                                 PossiblyHidden::Hidden
                             }
@@ -670,20 +671,20 @@ impl State {
         tunnel_finder: F,
         index: usize,
         count: usize,
-    ) -> SyncMessage {
+    ) -> SyncMessage<'_> {
         match self.state() {
             SlideState::Unstarted | SlideState::Question => SyncMessage::QuestionAnnouncement {
                 index,
                 count,
-                question: self.config.title.clone(),
-                media: self.config.media.clone(),
+                question: &self.config.title,
+                media: self.config.media.as_ref(),
                 duration: self.config.introduce_question.map(|d| d.saturating_sub(self.elapsed())),
             },
             SlideState::Answers => SyncMessage::AnswersAnnouncement {
                 index,
                 count,
-                question: self.config.title.clone(),
-                media: self.config.media.clone(),
+                question: &self.config.title,
+                media: self.config.media.as_ref(),
                 duration: self.config.time_limit.map(|d| d.saturating_sub(self.elapsed())),
                 answers: self.get_answers_for_player(
                     watcher_id,
@@ -701,9 +702,9 @@ impl State {
                 SyncMessage::AnswersResults {
                     index,
                     count,
-                    question: self.config.title.clone(),
-                    media: self.config.media.clone(),
-                    answers: self.config.answers.iter().map(|a| a.content.clone()).collect_vec(),
+                    question: &self.config.title,
+                    media: self.config.media.as_ref(),
+                    answers: self.config.answers.iter().map(|a| a.content.as_ref()).collect_vec(),
                     results: self
                         .config
                         .answers

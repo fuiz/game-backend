@@ -5,17 +5,20 @@
 //! functionality for tracking participant types, sending messages, and managing
 //! the overall participant lifecycle.
 
-use std::{
-    collections::{HashMap, HashSet},
-    fmt::Display,
-    str::FromStr,
-};
+use std::{fmt::Display, hash::BuildHasherDefault, str::FromStr};
 
 use enum_map::{Enum, EnumMap};
+use hashlink::LinkedHashSet;
 use itertools::Itertools;
+use rustc_hash::{FxHashMap, FxHasher};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
+
+/// `LinkedHashSet` keyed by `Id` (random UUID bytes) using FxHash. Avoids the
+/// SipHash overhead of the default `RandomState` for keys that already have
+/// uniform/random bits.
+type FxLinkedHashSet<T> = LinkedHashSet<T, BuildHasherDefault<FxHasher>>;
 
 use super::{
     SyncMessage, UpdateMessage,
@@ -154,7 +157,7 @@ impl PlayerValue {
 /// Serialization helper for Watchers struct
 #[derive(Deserialize)]
 struct WatchersSerde {
-    mapping: HashMap<Id, Value>,
+    mapping: FxHashMap<Id, Value>,
     max_player_count: usize,
 }
 
@@ -167,11 +170,14 @@ struct WatchersSerde {
 #[serde(from = "WatchersSerde")]
 pub struct Watchers {
     /// Primary mapping from participant ID to their value/state
-    mapping: HashMap<Id, Value>,
+    mapping: FxHashMap<Id, Value>,
 
-    /// Reverse mapping organized by participant type for efficient filtering
+    /// Reverse mapping organized by participant type for efficient filtering.
+    /// Uses `LinkedHashSet` so iteration follows insertion order (letting the
+    /// waiting screen surface the most recently joined players) while keeping
+    /// O(1) insertion and removal.
     #[serde(skip_serializing)]
-    reverse_mapping: EnumMap<ValueKind, HashSet<Id>>,
+    reverse_mapping: EnumMap<ValueKind, FxLinkedHashSet<Id>>,
 
     /// Maximum number of players allowed in a single game session
     max_player_count: usize,
@@ -187,7 +193,7 @@ impl From<WatchersSerde> for Watchers {
             mapping,
             max_player_count,
         } = serde;
-        let mut reverse_mapping: EnumMap<ValueKind, HashSet<Id>> = EnumMap::default();
+        let mut reverse_mapping: EnumMap<ValueKind, FxLinkedHashSet<Id>> = EnumMap::default();
         for (id, value) in &mapping {
             reverse_mapping[value.kind()].insert(*id);
         }
@@ -211,7 +217,7 @@ impl Watchers {
     /// Creates a new empty Watchers instance with the given maximum player count.
     pub fn new(max_player_count: usize) -> Self {
         Self {
-            mapping: HashMap::default(),
+            mapping: FxHashMap::default(),
             reverse_mapping: EnumMap::default(),
             max_player_count,
         }
@@ -226,12 +232,12 @@ impl Watchers {
     pub fn with_host_id(host_id: Id, max_player_count: usize) -> Self {
         Self {
             mapping: {
-                let mut map = HashMap::default();
+                let mut map = FxHashMap::default();
                 map.insert(host_id, Value::Host);
                 map
             },
             reverse_mapping: {
-                let mut map: EnumMap<ValueKind, HashSet<Id>> = EnumMap::default();
+                let mut map: EnumMap<ValueKind, FxLinkedHashSet<Id>> = EnumMap::default();
                 map[ValueKind::Host].insert(host_id);
                 map
             },
@@ -260,6 +266,18 @@ impl Watchers {
             .collect_vec()
     }
 
+    /// Lazy iterator over `(Id, Tunnel, ValueKind)` for every live watcher.
+    ///
+    /// Like [`Self::vec`] but yields just the kind tag instead of cloning the
+    /// full `Value`. Used by broadcast paths that branch on participant role
+    /// without needing the inner data.
+    pub fn iter_kinds<F: TunnelFinder>(&self, tunnel_finder: F) -> impl Iterator<Item = (Id, F::Tunnel, ValueKind)> {
+        self.reverse_mapping
+            .iter()
+            .flat_map(move |(kind, ids)| ids.iter().map(move |id| (*id, kind)))
+            .filter_map(move |(id, kind)| tunnel_finder(id).map(|t| (id, t, kind)))
+    }
+
     /// Gets a vector of participants of a specific type with their tunnels and values
     ///
     /// # Arguments
@@ -281,12 +299,14 @@ impl Watchers {
     ///
     /// Like [`Self::specific_vec`] but doesn't eagerly collect or clone, so
     /// callers that only need a prefix (e.g. via `.take(N)`) can avoid the
-    /// per-watcher work for the rest of the set.
+    /// per-watcher work for the rest of the set. Yields entries in insertion
+    /// order; the iterator is double-ended so callers (e.g. the waiting screen)
+    /// can `.rev()` for most-recent-first.
     pub fn specific_iter<F: TunnelFinder>(
         &self,
         filter: ValueKind,
         tunnel_finder: F,
-    ) -> impl Iterator<Item = (Id, F::Tunnel, &Value)> {
+    ) -> impl DoubleEndedIterator<Item = (Id, F::Tunnel, &Value)> {
         self.reverse_mapping[filter].iter().filter_map(move |id| {
             let tunnel = tunnel_finder(*id)?;
             let value = self.mapping.get(id)?;
@@ -390,6 +410,11 @@ impl Watchers {
         self.mapping.get(&watcher_id).map(std::borrow::ToOwned::to_owned)
     }
 
+    /// Like [`Self::get_watcher_value`] but returns a reference instead of cloning.
+    pub fn get_watcher_value_ref(&self, watcher_id: Id) -> Option<&Value> {
+        self.mapping.get(&watcher_id)
+    }
+
     /// Checks if a watcher exists in the game session
     ///
     /// # Arguments
@@ -474,9 +499,9 @@ impl Watchers {
     /// # Returns
     ///
     /// The player's name if they are a player, otherwise `None`
-    pub fn get_name(&self, watcher_id: Id) -> Option<String> {
-        self.get_watcher_value(watcher_id).and_then(|v| match v {
-            Value::Player(player_value) => Some(player_value.name().to_owned()),
+    pub fn get_name(&self, watcher_id: Id) -> Option<&str> {
+        self.get_watcher_value_ref(watcher_id).and_then(|v| match v {
+            Value::Player(player_value) => Some(player_value.name()),
             _ => None,
         })
     }
@@ -490,9 +515,9 @@ impl Watchers {
     /// # Returns
     ///
     /// The team name if the watcher is a team player, otherwise `None`
-    pub fn get_team_name(&self, watcher_id: Id) -> Option<String> {
-        self.get_watcher_value(watcher_id).and_then(|v| match v {
-            Value::Player(PlayerValue::Team { team_name, .. }) => Some(team_name),
+    pub fn get_team_name(&self, watcher_id: Id) -> Option<&str> {
+        self.get_watcher_value_ref(watcher_id).and_then(|v| match v {
+            Value::Player(PlayerValue::Team { team_name, .. }) => Some(team_name.as_str()),
             _ => None,
         })
     }
@@ -506,12 +531,12 @@ impl Watchers {
     ///
     /// * `sender` - Function that generates messages for each watcher
     /// * `tunnel_finder` - Function to retrieve tunnels for watchers
-    pub fn announce_with<S, F: TunnelFinder>(&self, sender: S, tunnel_finder: F)
+    pub fn announce_with<'a, S, F: TunnelFinder>(&self, sender: S, tunnel_finder: F)
     where
-        S: Fn(Id, ValueKind) -> Option<super::UpdateMessage>,
+        S: Fn(Id, ValueKind) -> Option<super::UpdateMessage<'a>>,
     {
-        for (watcher, session, v) in self.vec(tunnel_finder) {
-            let Some(message) = sender(watcher, v.kind()) else {
+        for (watcher, session, kind) in self.iter_kinds(tunnel_finder) {
+            let Some(message) = sender(watcher, kind) else {
                 continue;
             };
 
@@ -525,7 +550,7 @@ impl Watchers {
     ///
     /// * `message` - The update message to broadcast
     /// * `tunnel_finder` - Function to retrieve tunnels for watchers
-    pub fn announce<F: TunnelFinder>(&self, message: &super::UpdateMessage, tunnel_finder: F) {
+    pub fn announce<F: TunnelFinder>(&self, message: &super::UpdateMessage<'_>, tunnel_finder: F) {
         self.announce_with(
             |_, value_kind| {
                 if matches!(value_kind, ValueKind::Unassigned) {
@@ -548,7 +573,7 @@ impl Watchers {
     pub fn announce_specific<F: TunnelFinder>(
         &self,
         filter: ValueKind,
-        message: &super::UpdateMessage,
+        message: &super::UpdateMessage<'_>,
         tunnel_finder: F,
     ) {
         for (_, session, _) in self.specific_vec(filter, tunnel_finder) {
@@ -561,13 +586,15 @@ impl Watchers {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
-    use std::collections::VecDeque;
+    use std::collections::{HashMap, HashSet, VecDeque};
     use std::sync::{Arc, Mutex};
 
     #[derive(Debug, Clone)]
     struct MockTunnel {
-        messages: Arc<Mutex<VecDeque<UpdateMessage>>>,
-        states: Arc<Mutex<VecDeque<SyncMessage>>>,
+        // Stored as JSON so the tunnel doesn't need to thread the message
+        // lifetime through its internal state — same shape as real tunnels.
+        messages: Arc<Mutex<VecDeque<String>>>,
+        states: Arc<Mutex<VecDeque<String>>>,
         closed: Arc<Mutex<bool>>,
     }
 
@@ -580,11 +607,11 @@ mod tests {
             }
         }
 
-        fn received_messages(&self) -> Vec<UpdateMessage> {
+        fn received_messages(&self) -> Vec<String> {
             self.messages.lock().unwrap().clone().into()
         }
 
-        fn received_states(&self) -> Vec<SyncMessage> {
+        fn received_states(&self) -> Vec<String> {
             self.states.lock().unwrap().clone().into()
         }
 
@@ -594,12 +621,18 @@ mod tests {
     }
 
     impl Tunnel for MockTunnel {
-        fn send_message(&self, message: &UpdateMessage) {
-            self.messages.lock().unwrap().push_back(message.clone());
+        fn send_message(&self, message: &UpdateMessage<'_>) {
+            self.messages
+                .lock()
+                .unwrap()
+                .push_back(serde_json::to_string(message).unwrap_or_default());
         }
 
-        fn send_state(&self, message: &SyncMessage) {
-            self.states.lock().unwrap().push_back(message.clone());
+        fn send_state(&self, message: &SyncMessage<'_>) {
+            self.states
+                .lock()
+                .unwrap()
+                .push_back(serde_json::to_string(message).unwrap_or_default());
         }
 
         fn close(self) {
@@ -608,12 +641,12 @@ mod tests {
     }
 
     // Mock UpdateMessage for testing
-    fn mock_update_message() -> UpdateMessage {
+    fn mock_update_message() -> UpdateMessage<'static> {
         UpdateMessage::Game(crate::game::UpdateMessage::IdAssign(Id::new()))
     }
 
     // Mock SyncMessage for testing
-    fn mock_sync_message() -> SyncMessage {
+    fn mock_sync_message() -> SyncMessage<'static> {
         SyncMessage::Game(crate::game::SyncMessage::WaitingScreen(crate::TruncatedVec::default()))
     }
 
@@ -719,7 +752,7 @@ mod tests {
         assert!(watchers.has_watcher(player_id));
         assert_eq!(watchers.specific_count(ValueKind::Player), 1);
         assert_eq!(watchers.get_watcher_value(player_id), Some(player_value));
-        assert_eq!(watchers.get_name(player_id), Some("Alice".to_string()));
+        assert_eq!(watchers.get_name(player_id), Some("Alice"));
     }
 
     #[test]
@@ -738,8 +771,8 @@ mod tests {
 
         assert!(watchers.has_watcher(player_id));
         assert_eq!(watchers.specific_count(ValueKind::Player), 1);
-        assert_eq!(watchers.get_name(player_id), Some("Bob".to_string()));
-        assert_eq!(watchers.get_team_name(player_id), Some("Team A".to_string()));
+        assert_eq!(watchers.get_name(player_id), Some("Bob"));
+        assert_eq!(watchers.get_team_name(player_id), Some("Team A"));
     }
 
     #[test]

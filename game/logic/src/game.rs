@@ -61,6 +61,21 @@ pub struct TeamOptions {
     assign_random: bool,
 }
 
+/// Policy for handling potentially profane player/team names.
+///
+/// Controls whether `Names::set_name` rejects entries that the rustrict
+/// content filter flags as inappropriate. The censor adds significant
+/// per-name CPU cost (per-character automaton + match table), so trusted
+/// environments and benchmarks can opt out.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+pub enum Profanity {
+    /// Reject names that rustrict considers inappropriate.
+    #[default]
+    Censor,
+    /// Skip the rustrict check and accept any non-empty name.
+    Allow,
+}
+
 /// Global configuration options for the game session
 ///
 /// These options affect the overall behavior of the game, including
@@ -80,6 +95,22 @@ pub struct Options {
     /// Team configuration (None means individual play)
     #[garde(dive)]
     teams: Option<TeamOptions>,
+    /// Profanity-filter policy for submitted player and team names.
+    /// Defaults to [`Profanity::Censor`]; existing payloads that omit the
+    /// field deserialize to the default.
+    #[garde(skip)]
+    #[serde(default)]
+    profanity: Profanity,
+}
+
+impl Options {
+    /// Builder-style override for the profanity policy. Useful for tests
+    /// and benchmarks that want to construct an `Options` with the censor off.
+    #[must_use]
+    pub fn with_profanity(mut self, profanity: Profanity) -> Self {
+        self.profanity = profanity;
+        self
+    }
 }
 
 /// The main game session struct
@@ -203,23 +234,23 @@ pub enum IncomingHostMessage {
 /// These messages inform participants about changes that affect their
 /// view or interaction with the game.
 #[derive(Debug, Serialize, Clone)]
-pub enum UpdateMessage {
+pub enum UpdateMessage<'a> {
     /// Assign a unique ID to a participant
     IdAssign(Id),
     /// Update the waiting screen with current players
-    WaitingScreen(TruncatedVec<String>),
+    WaitingScreen(TruncatedVec<&'a str>),
     /// Update the team display screen
-    TeamDisplay(TruncatedVec<String>),
+    TeamDisplay(TruncatedVec<&'a str>),
     /// Prompt the participant to choose a name
     NameChoose,
     /// Confirm a name assignment
-    NameAssign(String),
+    NameAssign(&'a str),
     /// Report an error with name validation
     NameError(names::Error),
     /// Send leaderboard information
     Leaderboard {
         /// The leaderboard data to display
-        leaderboard: LeaderboardMessage,
+        leaderboard: LeaderboardMessage<'a>,
     },
     /// Send individual score information
     Score {
@@ -227,15 +258,15 @@ pub enum UpdateMessage {
         score: Option<ScoreMessage>,
     },
     /// Send game summary information
-    Summary(SummaryMessage),
+    Summary(SummaryMessage<'a>),
     /// Inform player to find a team (team games only)
-    FindTeam(String),
+    FindTeam(&'a str),
     /// Prompt for teammate selection during team formation
     ChooseTeammates {
         /// Maximum number of teammates that can be selected
         max_selection: usize,
         /// Available players with their current selection status: (name, is_selected)
-        available: Vec<(String, bool)>,
+        available: Vec<(&'a str, bool)>,
     },
 }
 
@@ -244,11 +275,11 @@ pub enum UpdateMessage {
 /// These messages are sent when participants connect or when their view
 /// needs to be completely synchronized with the current game state.
 #[derive(Debug, Serialize, Clone)]
-pub enum SyncMessage {
+pub enum SyncMessage<'a> {
     /// Sync waiting screen with current players
-    WaitingScreen(TruncatedVec<String>),
+    WaitingScreen(TruncatedVec<&'a str>),
     /// Sync team display screen
-    TeamDisplay(TruncatedVec<String>),
+    TeamDisplay(TruncatedVec<&'a str>),
     /// Sync leaderboard view with position information
     Leaderboard {
         /// Current slide index
@@ -256,7 +287,7 @@ pub enum SyncMessage {
         /// Total number of slides
         count: usize,
         /// The leaderboard data to display
-        leaderboard: LeaderboardMessage,
+        leaderboard: LeaderboardMessage<'a>,
     },
     /// Sync individual score view with position information
     Score {
@@ -270,17 +301,17 @@ pub enum SyncMessage {
     /// Sync metadata about the game state
     Metainfo(MetainfoMessage),
     /// Sync game summary information
-    Summary(SummaryMessage),
+    Summary(SummaryMessage<'a>),
     /// Participant is not allowed to join
     NotAllowed,
     /// Sync team finding information
-    FindTeam(String),
+    FindTeam(&'a str),
     /// Sync teammate selection options
     ChooseTeammates {
         /// Maximum number of teammates that can be selected
         max_selection: usize,
         /// Available players with their current selection status: (name, is_selected)
-        available: Vec<(String, bool)>,
+        available: Vec<(&'a str, bool)>,
     },
 }
 
@@ -288,8 +319,11 @@ pub enum SyncMessage {
 ///
 /// This enum provides different views of the game results depending
 /// on whether the recipient is a player or the host.
+///
+/// `config` is borrowed from the live `Game` so that broadcasting the summary
+/// to every recipient doesn't deep-clone the entire slide list per send.
 #[derive(Debug, Serialize, Clone)]
-pub enum SummaryMessage {
+pub enum SummaryMessage<'a> {
     /// Summary for individual players
     Player {
         /// Player's final score information
@@ -297,7 +331,7 @@ pub enum SummaryMessage {
         /// Points earned on each question
         points: Vec<u64>,
         /// The game configuration that was played
-        config: Fuiz,
+        config: &'a Fuiz,
     },
     /// Summary for the game host with detailed statistics
     Host {
@@ -310,7 +344,7 @@ pub enum SummaryMessage {
         /// Team composition mapping: (team_name, \[player_names\])
         team_mapping: Vec<(String, Vec<String>)>,
         /// The game configuration that was played
-        config: Fuiz,
+        config: &'a Fuiz,
         /// Game options that were used
         options: Options,
     },
@@ -341,11 +375,11 @@ pub enum MetainfoMessage {
 /// Contains both current standings and previous round standings
 /// for comparison and ranking visualization.
 #[derive(Debug, Serialize, Clone)]
-pub struct LeaderboardMessage {
+pub struct LeaderboardMessage<'a> {
     /// Current leaderboard standings
-    pub current: TruncatedVec<(String, u64)>,
+    pub current: TruncatedVec<(&'a str, u64)>,
     /// Previous round's standings for comparison
-    pub prior: TruncatedVec<(String, u64)>,
+    pub prior: TruncatedVec<(&'a str, u64)>,
 }
 
 // Convenience methods
@@ -410,7 +444,7 @@ impl Game {
         watcher: Id,
         team_manager: &TeamManager<names::NameStyle>,
         tunnel_finder: F,
-    ) -> UpdateMessage {
+    ) -> UpdateMessage<'_> {
         let pref: HashSet<_> = team_manager
             .get_preferences(watcher)
             .unwrap_or_default()
@@ -446,7 +480,7 @@ impl Game {
     ///
     /// * `T` - Type implementing the Tunnel trait for participant communication
     /// * `F` - Function type for finding tunnels by participant ID
-    fn waiting_screen_names<F: TunnelFinder>(&self, tunnel_finder: F) -> TruncatedVec<String> {
+    fn waiting_screen_names<F: TunnelFinder>(&self, tunnel_finder: F) -> TruncatedVec<&str> {
         const LIMIT: usize = 50;
 
         if let Some(team_manager) = &self.team_manager
@@ -455,14 +489,19 @@ impl Game {
             return team_manager.team_names().unwrap_or_default();
         }
 
+        // Names are already unique (enforced by `Names::set_name`), so we can
+        // skip `.unique()` and avoid the per-call HashSet of seen names.
+        // Iterate most-recent-first so the waiting screen surfaces the latest
+        // joiners; `Watchers::specific_iter` walks an `IndexSet` in insertion
+        // order, so `.rev()` here yields the most recent `LIMIT` entries.
         let player_names = self
             .watchers
             .specific_iter(ValueKind::Player, tunnel_finder)
+            .rev()
             .filter_map(|(_, _, x)| match x {
-                Value::Player(player_value) => Some(player_value.name().to_owned()),
+                Value::Player(player_value) => Some(player_value.name()),
                 _ => None,
-            })
-            .unique();
+            });
 
         TruncatedVec::new(player_names, LIMIT, self.watchers.specific_count(ValueKind::Player))
     }
@@ -476,7 +515,7 @@ impl Game {
     /// # Returns
     ///
     /// A `LeaderboardMessage` with current and prior standings
-    fn leaderboard_message(&self) -> LeaderboardMessage {
+    fn leaderboard_message(&self) -> LeaderboardMessage<'_> {
         let [current, prior] = self.leaderboard.last_two_scores_descending();
 
         let id_map = |i| self.names.get_name_or_unknown(&i);
@@ -556,7 +595,12 @@ impl Game {
             if let Some(team_manager) = &mut self.team_manager
                 && matches!(self.state, State::WaitingScreen)
             {
-                team_manager.finalize(&mut self.watchers, &mut self.names, &tunnel_finder);
+                team_manager.finalize(
+                    &mut self.watchers,
+                    &mut self.names,
+                    &tunnel_finder,
+                    self.options.profanity,
+                );
                 self.state = State::TeamDisplay;
                 self.watchers.announce_with(
                     |id, kind| {
@@ -693,13 +737,13 @@ impl Game {
                             player_count: total_players,
                             results: player_scores
                                 .into_iter()
-                                .map(|(id, points)| (self.names.get_name_or_unknown(&id), points))
+                                .map(|(id, points)| (self.names.get_name_or_unknown(&id).to_owned(), points))
                                 .collect(),
                             team_mapping: self
                                 .team_manager
                                 .as_ref()
                                 .map_or(vec![], |tm| tm.team_assignments(&self.names)),
-                            config: self.fuiz_config.clone(),
+                            config: &self.fuiz_config,
                             options: self.options,
                         }
                     })
@@ -715,7 +759,7 @@ impl Game {
                         points: self
                             .leaderboard
                             .player_summary(self.leaderboard_id(id), !self.options.no_leaderboard),
-                        config: self.fuiz_config.clone(),
+                        config: &self.fuiz_config,
                     })
                     .into(),
                 ),
@@ -835,7 +879,7 @@ impl Game {
         name: &str,
         tunnel_finder: F,
     ) -> Result<(), names::Error> {
-        let name = self.names.set_name(watcher, name)?;
+        let name = self.names.set_name(watcher, name, self.options.profanity)?;
 
         self.watchers.update_watcher_value(
             watcher,
@@ -867,14 +911,10 @@ impl Game {
         if let Some(team_manager) = &mut self.team_manager
             && let Some(name) = team_manager.add_player(watcher, &mut self.watchers)
         {
-            Watchers::send_message(&UpdateMessage::FindTeam(name).into(), watcher, &tunnel_finder);
+            Watchers::send_message(&UpdateMessage::FindTeam(&name).into(), watcher, &tunnel_finder);
         }
 
-        Watchers::send_message(
-            &UpdateMessage::NameAssign(name.to_string()).into(),
-            watcher,
-            &tunnel_finder,
-        );
+        Watchers::send_message(&UpdateMessage::NameAssign(name).into(), watcher, &tunnel_finder);
 
         self.update_player_with_options(watcher, &tunnel_finder);
 
@@ -971,11 +1011,11 @@ impl Game {
         schedule_message: S,
         tunnel_finder: F,
     ) {
-        let Some(watcher_value) = self.watchers.get_watcher_value(watcher_id) else {
+        let Some(watcher_kind) = self.watchers.get_watcher_value_ref(watcher_id).map(Value::kind) else {
             return;
         };
 
-        if !message.follows(watcher_value.kind()) {
+        if !message.follows(watcher_kind) {
             return;
         }
 
@@ -1136,7 +1176,7 @@ impl Game {
         watcher_id: Id,
         watcher_kind: ValueKind,
         tunnel_finder: F,
-    ) -> super::SyncMessage {
+    ) -> super::SyncMessage<'_> {
         match &self.state {
             State::WaitingScreen => match &self.team_manager {
                 Some(team_manager)
@@ -1207,13 +1247,13 @@ impl Game {
                         player_count: total_players,
                         results: player_scores
                             .into_iter()
-                            .map(|(id, points)| (self.names.get_name_or_unknown(&id), points))
+                            .map(|(id, points)| (self.names.get_name_or_unknown(&id).to_owned(), points))
                             .collect(),
                         team_mapping: self
                             .team_manager
                             .as_ref()
                             .map_or(vec![], |tm| tm.team_assignments(&self.names)),
-                        config: self.fuiz_config.clone(),
+                        config: &self.fuiz_config,
                         options: self.options,
                     }
                 })
@@ -1227,7 +1267,7 @@ impl Game {
                     points: self
                         .leaderboard
                         .player_summary(self.leaderboard_id(watcher_id), !self.options.no_leaderboard),
-                    config: self.fuiz_config.clone(),
+                    config: &self.fuiz_config,
                 })
                 .into(),
                 ValueKind::Unassigned => SyncMessage::NotAllowed.into(),
@@ -1242,8 +1282,8 @@ impl Game {
     /// The watcher's role is preserved in `mapping` so they can reconnect via
     /// [`Self::update_session`].
     pub fn watcher_left(&mut self, watcher_id: Id) {
-        if let Some(watcher_value) = self.watchers.get_watcher_value(watcher_id)
-            && matches!(watcher_value.kind(), ValueKind::Player)
+        let kind = self.watchers.get_watcher_value_ref(watcher_id).map(Value::kind);
+        if matches!(kind, Some(ValueKind::Player))
             && let State::Slide(current_slide) = &mut self.state
         {
             current_slide.state.mark_watcher_left(watcher_id);
@@ -1267,20 +1307,26 @@ impl Game {
     /// * `T` - Type implementing the Tunnel trait for participant communication
     /// * `F` - Function type for finding tunnels by participant ID
     pub fn update_session<F: TunnelFinder>(&mut self, watcher_id: Id, tunnel_finder: F) {
-        let Some(watcher_value) = self.watchers.get_watcher_value(watcher_id) else {
+        // Cheap kind probe — Copy value, borrow ends on this line.
+        let Some(kind) = self.watchers.get_watcher_value_ref(watcher_id).map(Value::kind) else {
             return;
         };
 
         // Reconnection: re-add to the live set and let the active slide put
         // any prior answer back into its live-answered tally.
         self.watchers.watcher_returned(watcher_id);
-        if matches!(watcher_value.kind(), ValueKind::Player)
+        if matches!(kind, ValueKind::Player)
             && let State::Slide(current_slide) = &mut self.state
         {
             current_slide.state.mark_watcher_returned(watcher_id);
         }
 
-        match watcher_value.clone() {
+        // Re-fetch as a ref now that mutations are done — no clone.
+        let Some(watcher_value) = self.watchers.get_watcher_value_ref(watcher_id) else {
+            return;
+        };
+
+        match watcher_value {
             Value::Host => {
                 Watchers::send_state(
                     &self.state_message(watcher_id, watcher_value.kind(), &tunnel_finder),
@@ -1298,16 +1344,12 @@ impl Game {
                     team_name,
                     individual_name: _,
                     team_id: _,
-                } = &player_value
+                } = player_value
                 {
-                    Watchers::send_message(
-                        &UpdateMessage::FindTeam(team_name.clone()).into(),
-                        watcher_id,
-                        &tunnel_finder,
-                    );
+                    Watchers::send_message(&UpdateMessage::FindTeam(team_name).into(), watcher_id, &tunnel_finder);
                 }
                 Watchers::send_message(
-                    &UpdateMessage::NameAssign(player_value.name().to_owned()).into(),
+                    &UpdateMessage::NameAssign(player_value.name()).into(),
                     watcher_id,
                     &tunnel_finder,
                 );
@@ -1389,6 +1431,7 @@ mod tests {
             show_answers: false,
             no_leaderboard: false,
             teams: None,
+            profanity: Profanity::Censor,
         };
 
         let json = serde_json::to_string(&game_options).unwrap();
@@ -1411,6 +1454,7 @@ mod tests {
             show_answers: true,
             no_leaderboard: true,
             teams: Some(team_options),
+            profanity: Profanity::Censor,
         };
 
         let json = serde_json::to_string(&game_options).unwrap();
@@ -1462,6 +1506,7 @@ mod tests {
             show_answers: false,
             no_leaderboard: false,
             teams: None,
+            profanity: Profanity::Censor,
         };
         let host_id = crate::watcher::Id::new();
 
@@ -1486,6 +1531,7 @@ mod tests {
             show_answers: true,
             no_leaderboard: true,
             teams: Some(team_options),
+            profanity: Profanity::Censor,
         };
         let host_id = crate::watcher::Id::new();
 
@@ -1575,8 +1621,8 @@ mod tests {
 
     #[test]
     fn test_leaderboard_message_serialization() {
-        let current_data = vec![("Player1".to_string(), 100)];
-        let prior_data = vec![("Player1".to_string(), 50)];
+        let current_data = [("Player1", 100u64)];
+        let prior_data = [("Player1", 50u64)];
 
         let leaderboard_msg = LeaderboardMessage {
             current: crate::TruncatedVec::new(current_data.into_iter(), 10, 1),
@@ -2282,11 +2328,11 @@ mod tests {
         let json = serde_json::to_string(&name_choose).unwrap();
         assert!(json.contains("NameChoose"));
 
-        let name_assign = UpdateMessage::NameAssign("TestName".to_string());
+        let name_assign = UpdateMessage::NameAssign("TestName");
         let json = serde_json::to_string(&name_assign).unwrap();
         assert!(json.contains("TestName"));
 
-        let find_team = UpdateMessage::FindTeam("TeamName".to_string());
+        let find_team = UpdateMessage::FindTeam("TeamName");
         let json = serde_json::to_string(&find_team).unwrap();
         assert!(json.contains("TeamName"));
     }
@@ -2314,10 +2360,11 @@ mod tests {
 
     #[test]
     fn test_summary_message_serialization() {
+        let fuiz = create_test_fuiz();
         let player_summary = SummaryMessage::Player {
             score: None,
             points: vec![100, 200],
-            config: create_test_fuiz(),
+            config: &fuiz,
         };
         let json = serde_json::to_string(&player_summary).unwrap();
         assert!(json.contains("Player"));
@@ -2328,7 +2375,7 @@ mod tests {
             player_count: 15,
             results: vec![],
             team_mapping: vec![],
-            config: create_test_fuiz(),
+            config: &fuiz,
             options: Options::default(),
         };
         let json = serde_json::to_string(&host_summary).unwrap();
@@ -2995,6 +3042,7 @@ mod tests {
                 size: 3,
                 assign_random: true,
             }),
+            profanity: Profanity::Censor,
         };
         assert!(valid_options.validate_with(&test_settings()).is_ok());
 
@@ -3006,6 +3054,7 @@ mod tests {
                 size: 0, // Invalid
                 assign_random: true,
             }),
+            profanity: Profanity::Censor,
         };
         assert!(invalid_options.validate_with(&test_settings()).is_err());
     }
@@ -3036,8 +3085,8 @@ mod tests {
 
         let names = game.waiting_screen_names(tunnel_finder);
         assert_eq!(names.items.len(), 2);
-        assert!(names.items.contains(&"Player1".to_string()));
-        assert!(names.items.contains(&"Player2".to_string()));
+        assert!(names.items.contains(&"Player1"));
+        assert!(names.items.contains(&"Player2"));
     }
 
     #[test]

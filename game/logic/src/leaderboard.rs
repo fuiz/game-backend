@@ -5,8 +5,8 @@
 //! maintaining leaderboards, and providing score summaries and statistics.
 
 use itertools::Itertools;
+use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 use super::{TruncatedVec, watcher::Id};
 
@@ -19,7 +19,7 @@ pub struct FinalSummary {
     /// For each slide, tuple of (players who earned points, players who didn't)
     stats: Vec<(usize, usize)>,
     /// For each player, the points they earned on each slide
-    player_to_points: HashMap<Id, Vec<u64>>,
+    player_to_points: FxHashMap<Id, Vec<u64>>,
 }
 
 /// Serialization helper for Leaderboard struct
@@ -47,7 +47,7 @@ pub(crate) struct Leaderboard {
     scores_descending: Vec<(Id, u64)>,
     /// Mapping from player ID to their total score and leaderboard position (cached)
     #[serde(skip)]
-    score_and_position: HashMap<Id, (u64, usize)>,
+    score_and_position: FxHashMap<Id, (u64, usize)>,
     /// Final game summary (computed once when needed)
     #[serde(skip)]
     final_summary: once_cell_serde::sync::OnceCell<FinalSummary>,
@@ -71,7 +71,7 @@ impl From<LeaderboardSerde> for Leaderboard {
                     Err(((id1, points1), (id2, points2)))
                 }
             })
-            .collect::<HashMap<_, _>>();
+            .collect::<FxHashMap<_, _>>();
 
         let previous_total_score_mapping = serde
             .points_earned
@@ -88,7 +88,7 @@ impl From<LeaderboardSerde> for Leaderboard {
                     Err(((id1, points1), (id2, points2)))
                 }
             })
-            .collect::<HashMap<_, _>>();
+            .collect::<FxHashMap<_, _>>();
 
         let scores_descending = total_score_mapping
             .iter()
@@ -155,7 +155,7 @@ impl Leaderboard {
     ///
     /// * `scores` - Slice of (player_id, points_earned) tuples for the round
     pub fn add_scores(&mut self, scores: &[(Id, u64)]) {
-        let mut summary: HashMap<Id, u64> = self
+        let mut summary: FxHashMap<Id, u64> = self
             .score_and_position
             .iter()
             .map(|(id, (points, _))| (*id, *points))
@@ -254,11 +254,11 @@ impl Leaderboard {
                     points_earned
                         .iter()
                         .map(|(id, points)| (*id, map_score(*points)))
-                        .collect::<HashMap<_, _>>()
+                        .collect::<FxHashMap<_, _>>()
                 })
                 .enumerate()
                 .fold(
-                    HashMap::new(),
+                    FxHashMap::default(),
                     |mut aggregate_score_mapping, (slide_index, slide_score_mapping)| {
                         for (id, points) in slide_score_mapping {
                             let player_scores = aggregate_score_mapping
