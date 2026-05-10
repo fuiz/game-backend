@@ -537,16 +537,11 @@ impl Watchers {
     /// * `message` - The update message to broadcast
     /// * `tunnel_finder` - Function to retrieve tunnels for watchers
     pub fn announce<F: TunnelFinder>(&self, message: &super::UpdateMessage<'_>, tunnel_finder: F) {
-        self.announce_with(
-            |_, value_kind| {
-                if matches!(value_kind, ValueKind::Unassigned) {
-                    None
-                } else {
-                    Some(message.to_owned())
-                }
-            },
-            tunnel_finder,
-        );
+        for (_, session, kind) in self.iter_kinds(tunnel_finder) {
+            if !matches!(kind, ValueKind::Unassigned) {
+                session.send_message(message);
+            }
+        }
     }
 
     /// Sends an update message to all watchers of a specific type
