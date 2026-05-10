@@ -18,6 +18,7 @@ pub mod leaderboard;
 mod names;
 pub mod session;
 pub mod teams;
+pub mod time;
 pub mod watcher;
 
 /// Messages sent to synchronize state between players and hosts

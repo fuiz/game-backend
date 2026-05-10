@@ -33,7 +33,8 @@ use super::{
 ///
 /// The game progresses through different states, from waiting for players
 /// to join, through individual questions, to showing results and completion.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serializable", derive(Serialize, Deserialize))]
 pub enum State {
     /// Waiting screen showing current players before the game starts
     WaitingScreen,
@@ -118,7 +119,7 @@ impl Options {
 /// This struct represents a complete Fuiz game session, managing all
 /// aspects of the game including participant connections, question flow,
 /// scoring, team management, and real-time communication.
-#[derive(Serialize, Deserialize)]
+#[cfg_attr(feature = "serializable", derive(Serialize, Deserialize))]
 pub struct Game {
     /// The Fuiz configuration containing all questions and settings
     fuiz_config: Fuiz,
@@ -1378,6 +1379,7 @@ mod tests {
         crate::settings::Settings::default()
     }
 
+    #[cfg(feature = "serializable")]
     #[test]
     fn test_state_serialization() {
         let waiting_state = State::WaitingScreen;
@@ -3001,6 +3003,7 @@ mod tests {
         assert!(matches!(lock_msg, IncomingHostMessage::Lock(true)));
     }
 
+    #[cfg(feature = "serializable")]
     #[test]
     fn test_game_serialization() {
         let fuiz = create_test_fuiz();

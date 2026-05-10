@@ -10,12 +10,12 @@ use std::{
     time::Duration,
 };
 
+use crate::time::Timestamp;
 use garde::Validate;
 use itertools::Itertools;
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use serde_with::DurationMilliSeconds;
-use web_time::SystemTime;
 
 use crate::{
     fuiz::config::{ScheduleMessageFn, SlideAction},
@@ -78,19 +78,20 @@ pub struct SlideConfig {
 ///
 /// Tracks the current state of the slide including player answers,
 /// timing information, and the current phase of the question.
-#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serializable", derive(Serialize, serde::Deserialize))]
 pub struct State {
     /// The configuration this state was created from
     config: SlideConfig,
 
     // Runtime State
     /// Player text answers with submission timestamps
-    user_answers: FxHashMap<Id, (String, SystemTime)>,
+    user_answers: FxHashMap<Id, (String, Timestamp)>,
     /// Distinct live players who have answered. Maintained incrementally.
-    #[serde(default)]
+    #[cfg_attr(feature = "serializable", serde(default))]
     live_answered_count: usize,
     /// Time when text input was first enabled for players
-    answer_start: Option<SystemTime>,
+    answer_start: Option<Timestamp>,
     /// Current phase of the slide presentation
     state: SlideState,
     /// The set of cleaned player answers
@@ -238,21 +239,21 @@ impl SlideStateManager for State {
 }
 
 impl SlideTimer for State {
-    fn answer_start(&self) -> Option<SystemTime> {
+    fn answer_start(&self) -> Option<Timestamp> {
         self.answer_start
     }
 
-    fn set_answer_start(&mut self, time: Option<SystemTime>) {
+    fn set_answer_start(&mut self, time: Option<Timestamp>) {
         self.answer_start = time;
     }
 }
 
 impl AnswerHandler<String> for State {
-    fn user_answers(&self) -> &FxHashMap<Id, (String, SystemTime)> {
+    fn user_answers(&self) -> &FxHashMap<Id, (String, Timestamp)> {
         &self.user_answers
     }
 
-    fn user_answers_mut(&mut self) -> &mut FxHashMap<Id, (String, SystemTime)> {
+    fn user_answers_mut(&mut self) -> &mut FxHashMap<Id, (String, Timestamp)> {
         &mut self.user_answers
     }
 
@@ -378,6 +379,7 @@ impl State {
     ) {
         if self.change_state(SlideState::Question, SlideState::Answers) {
             self.start_timer();
+            self.reserve_for_players(watchers.specific_count(ValueKind::Player));
 
             watchers.announce(
                 &UpdateMessage::QuestionAnnouncement {

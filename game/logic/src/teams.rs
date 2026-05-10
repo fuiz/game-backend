@@ -7,6 +7,7 @@
 use std::collections::{BTreeSet, HashMap};
 
 use itertools::Itertools;
+#[cfg(feature = "serializable")]
 use serde::{Deserialize, Serialize};
 
 use super::{
@@ -23,7 +24,8 @@ use super::{
 /// either through random assignment or by respecting player preferences
 /// for teammates. It also manages team naming and maintains the mapping
 /// between players and their assigned teams.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug)]
+#[cfg_attr(feature = "serializable", derive(Serialize, Deserialize))]
 pub struct TeamManager<N: names::NamingScheme> {
     /// Mapping from player ID to their team ID
     player_to_team: HashMap<Id, Id>,

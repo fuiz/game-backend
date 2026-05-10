@@ -9,6 +9,15 @@ crate-type = ["lib"]
 
 [features]
 figment = ["dep:figment"] # Enable figment Provider impl for Settings
+# When enabled, the game `Timestamp` is stored as a `u64` count of nanoseconds
+# since the UNIX epoch and ships fully working serde impls. Required for any
+# consumer that persists `Game` state across the wire (e.g. fuiz-cloudflare's
+# DO/KV). When disabled (default), `Timestamp` wraps a native
+# `std::time::Instant` for the cheapest possible subtraction; serde impls
+# compile to runtime errors so any accidental serialization fails loud
+# instead of silently corrupting state. Wasm targets unconditionally use the
+# `u64` backing regardless of the feature.
+serializable = []
 
 [dependencies]
 # Configuration

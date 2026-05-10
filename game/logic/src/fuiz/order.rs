@@ -8,11 +8,11 @@
 
 use std::time::Duration;
 
+use crate::time::Timestamp;
 use garde::Validate;
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use serde_with::DurationMilliSeconds;
-use web_time::SystemTime;
 
 use crate::{
     fuiz::config::{ScheduleMessageFn, SlideAction},
@@ -91,7 +91,8 @@ pub struct SlideConfig {
 /// This struct maintains the dynamic state of an order question as it
 /// progresses through its phases, tracking player arrangements, timing
 /// information, shuffled item order, and current presentation state.
-#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serializable", derive(Serialize, serde::Deserialize))]
 pub struct State {
     /// The configuration this state was created from
     config: SlideConfig,
@@ -100,12 +101,12 @@ pub struct State {
     /// Items in shuffled order as presented to players
     shuffled_answers: Vec<String>,
     /// Player arrangements with submission timestamps
-    user_answers: FxHashMap<Id, (Vec<String>, SystemTime)>,
+    user_answers: FxHashMap<Id, (Vec<String>, Timestamp)>,
     /// Distinct live players who have answered. Maintained incrementally.
-    #[serde(default)]
+    #[cfg_attr(feature = "serializable", serde(default))]
     live_answered_count: usize,
     /// Time when the ordering interface was first displayed
-    answer_start: Option<SystemTime>,
+    answer_start: Option<Timestamp>,
     /// Current phase of the slide presentation
     state: SlideState,
 }
@@ -256,21 +257,21 @@ impl SlideStateManager for State {
 }
 
 impl SlideTimer for State {
-    fn answer_start(&self) -> Option<SystemTime> {
+    fn answer_start(&self) -> Option<Timestamp> {
         self.answer_start
     }
 
-    fn set_answer_start(&mut self, time: Option<SystemTime>) {
+    fn set_answer_start(&mut self, time: Option<Timestamp>) {
         self.answer_start = time;
     }
 }
 
 impl AnswerHandler<Vec<String>> for State {
-    fn user_answers(&self) -> &FxHashMap<Id, (Vec<String>, SystemTime)> {
+    fn user_answers(&self) -> &FxHashMap<Id, (Vec<String>, Timestamp)> {
         &self.user_answers
     }
 
-    fn user_answers_mut(&mut self) -> &mut FxHashMap<Id, (Vec<String>, SystemTime)> {
+    fn user_answers_mut(&mut self) -> &mut FxHashMap<Id, (Vec<String>, Timestamp)> {
         &mut self.user_answers
     }
 
@@ -416,6 +417,7 @@ impl State {
             fastrand::shuffle(&mut self.shuffled_answers);
 
             self.start_timer();
+            self.reserve_for_players(watchers.specific_count(ValueKind::Player));
 
             watchers.announce(
                 &UpdateMessage::AnswersAnnouncement {

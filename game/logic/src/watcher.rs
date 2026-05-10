@@ -75,7 +75,8 @@ impl FromStr for Id {
 ///
 /// This enum distinguishes between different participant types and their roles,
 /// determining what actions they can perform and what information they receive.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serializable", derive(Serialize, Deserialize))]
 pub enum Value {
     /// A connection that hasn't been assigned a role yet
     Unassigned,
@@ -119,7 +120,8 @@ impl Value {
 ///
 /// This enum differentiates between individual players and team players,
 /// tracking the necessary information for each type.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serializable", derive(Serialize, Deserialize))]
 pub enum PlayerValue {
     /// An individual player not part of a team
     Individual {
@@ -154,7 +156,10 @@ impl PlayerValue {
     }
 }
 
-/// Serialization helper for Watchers struct
+/// Serialization helper for Watchers struct. Only compiled when persistence
+/// is enabled, since `Watchers`' `Deserialize` (via `serde(from = ...)`)
+/// references it.
+#[cfg(feature = "serializable")]
 #[derive(Deserialize)]
 struct WatchersSerde {
     mapping: FxHashMap<Id, Value>,
@@ -166,8 +171,8 @@ struct WatchersSerde {
 /// This struct tracks all connected participants, their roles, and provides
 /// functionality for sending messages, managing state, and organizing
 /// participants by type.
-#[derive(Serialize, Deserialize)]
-#[serde(from = "WatchersSerde")]
+#[cfg_attr(feature = "serializable", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serializable", serde(from = "WatchersSerde"))]
 pub struct Watchers {
     /// Primary mapping from participant ID to their value/state
     mapping: FxHashMap<Id, Value>,
@@ -176,13 +181,14 @@ pub struct Watchers {
     /// Uses `LinkedHashSet` so iteration follows insertion order (letting the
     /// waiting screen surface the most recently joined players) while keeping
     /// O(1) insertion and removal.
-    #[serde(skip_serializing)]
+    #[cfg_attr(feature = "serializable", serde(skip_serializing))]
     reverse_mapping: EnumMap<ValueKind, FxLinkedHashSet<Id>>,
 
     /// Maximum number of players allowed in a single game session
     max_player_count: usize,
 }
 
+#[cfg(feature = "serializable")]
 impl From<WatchersSerde> for Watchers {
     /// Reconstructs the Watchers struct from serialized data
     ///
@@ -1222,6 +1228,7 @@ mod tests {
         assert_eq!(player_tunnel.received_messages().len(), 0);
     }
 
+    #[cfg(feature = "serializable")]
     #[test]
     fn test_serde_roundtrip() {
         let mut watchers = Watchers::new(1000);

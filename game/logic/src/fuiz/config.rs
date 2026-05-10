@@ -80,7 +80,8 @@ pub struct Fuiz {
 ///
 /// This struct tracks which slide is currently being presented and
 /// maintains its runtime state for player interactions and timing.
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serializable", derive(Serialize, Deserialize))]
 pub struct CurrentSlide {
     /// The index of the current slide in the slides vector
     pub index: usize,
@@ -127,7 +128,8 @@ impl SlideConfig {
 /// This enum represents the active state of a slide while it's being
 /// presented to players. It maintains timing information, player responses,
 /// and current phase information for each question type.
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serializable", derive(Serialize, Deserialize))]
 pub enum SlideState {
     /// Runtime state for a multiple choice question
     MultipleChoice(multiple_choice::State),
@@ -692,6 +694,7 @@ mod tests {
         assert!(!fuiz_with_slides.is_empty());
     }
 
+    #[cfg(feature = "serializable")]
     #[test]
     fn test_current_slide_serialization() {
         let mc_config = create_test_multiple_choice_config();

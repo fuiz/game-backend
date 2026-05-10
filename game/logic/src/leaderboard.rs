@@ -6,7 +6,9 @@
 
 use itertools::Itertools;
 use rustc_hash::FxHashMap;
-use serde::{Deserialize, Serialize};
+#[cfg(feature = "serializable")]
+use serde::Deserialize;
+use serde::Serialize;
 
 use super::{TruncatedVec, watcher::Id};
 
@@ -22,7 +24,10 @@ pub struct FinalSummary {
     player_to_points: FxHashMap<Id, Vec<u64>>,
 }
 
-/// Serialization helper for Leaderboard struct
+/// Serialization helper for Leaderboard struct. Only compiled when
+/// persistence is enabled, since `Leaderboard`'s `Deserialize` (via
+/// `serde(from = ...)`) references it.
+#[cfg(feature = "serializable")]
 #[derive(Deserialize)]
 struct LeaderboardSerde {
     points_earned: Vec<Vec<(Id, u64)>>,
@@ -33,26 +38,28 @@ struct LeaderboardSerde {
 /// This struct tracks points earned by players across all questions,
 /// maintains sorted leaderboards, and provides various scoring views
 /// and statistics for the game.
-#[derive(Debug, Default, Serialize, Deserialize)]
-#[serde(from = "LeaderboardSerde")]
+#[derive(Debug, Default)]
+#[cfg_attr(feature = "serializable", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serializable", serde(from = "LeaderboardSerde"))]
 pub(crate) struct Leaderboard {
     /// Points earned by each player for each slide/question
     points_earned: Vec<Vec<(Id, u64)>>,
 
     /// Previous round's scores in descending order (cached)
-    #[serde(skip)]
+    #[cfg_attr(feature = "serializable", serde(skip))]
     previous_scores_descending: Vec<(Id, u64)>,
     /// Current scores in descending order (cached)
-    #[serde(skip)]
+    #[cfg_attr(feature = "serializable", serde(skip))]
     scores_descending: Vec<(Id, u64)>,
     /// Mapping from player ID to their total score and leaderboard position (cached)
-    #[serde(skip)]
+    #[cfg_attr(feature = "serializable", serde(skip))]
     score_and_position: FxHashMap<Id, (u64, usize)>,
     /// Final game summary (computed once when needed)
-    #[serde(skip)]
+    #[cfg_attr(feature = "serializable", serde(skip))]
     final_summary: once_cell_serde::sync::OnceCell<FinalSummary>,
 }
 
+#[cfg(feature = "serializable")]
 impl From<LeaderboardSerde> for Leaderboard {
     /// Reconstructs the Leaderboard from serialized data
     ///
@@ -585,6 +592,7 @@ mod tests {
         assert_eq!(summary, vec![0, 0]); // Should return zeros for all rounds
     }
 
+    #[cfg(feature = "serializable")]
     #[test]
     fn test_leaderboard_serialization_deserialization() {
         let mut original = Leaderboard::default();
@@ -634,6 +642,7 @@ mod tests {
         assert!(serialized.contains('2'));
     }
 
+    #[cfg(feature = "serializable")]
     #[test]
     fn test_leaderboard_deserialization_with_same_player_multiple_previous_rounds() {
         // This test covers the missing coalesce case in previous_total_score_mapping

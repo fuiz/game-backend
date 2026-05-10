@@ -7,12 +7,12 @@
 
 use std::{collections::HashMap, time::Duration};
 
+use crate::time::Timestamp;
 use garde::Validate;
 use itertools::Itertools;
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use serde_with::DurationMilliSeconds;
-use web_time::SystemTime;
 
 use crate::{
     fuiz::config::{ScheduleMessageFn, SlideAction},
@@ -86,7 +86,8 @@ pub struct SlideConfig {
 /// This struct maintains the dynamic state of a multiple choice question
 /// as it progresses through its phases, tracking player responses,
 /// timing information, and current presentation state.
-#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serializable", derive(Serialize, serde::Deserialize))]
 pub struct State {
     /// The configuration this state was created from
     /// The configuration this state was created from
@@ -94,14 +95,14 @@ pub struct State {
 
     // Runtime State
     /// Stores player answers along with the timestamp when they were submitted
-    user_answers: FxHashMap<Id, (Vec<usize>, SystemTime)>,
+    user_answers: FxHashMap<Id, (Vec<usize>, Timestamp)>,
     /// Distinct live players who have answered. Maintained incrementally by
     /// [`AnswerHandler::record_answer`], [`AnswerHandler::mark_watcher_left`],
     /// and [`AnswerHandler::mark_watcher_returned`].
-    #[serde(default)]
+    #[cfg_attr(feature = "serializable", serde(default))]
     live_answered_count: usize,
     /// The time when answer options were first displayed to players
-    answer_start: Option<SystemTime>,
+    answer_start: Option<Timestamp>,
     /// Current phase of the slide presentation
     state: SlideState,
 }
@@ -294,21 +295,21 @@ impl SlideStateManager for State {
 }
 
 impl SlideTimer for State {
-    fn answer_start(&self) -> Option<SystemTime> {
+    fn answer_start(&self) -> Option<Timestamp> {
         self.answer_start
     }
 
-    fn set_answer_start(&mut self, time: Option<SystemTime>) {
+    fn set_answer_start(&mut self, time: Option<Timestamp>) {
         self.answer_start = time;
     }
 }
 
 impl AnswerHandler<Vec<usize>> for State {
-    fn user_answers(&self) -> &FxHashMap<Id, (Vec<usize>, SystemTime)> {
+    fn user_answers(&self) -> &FxHashMap<Id, (Vec<usize>, Timestamp)> {
         &self.user_answers
     }
 
-    fn user_answers_mut(&mut self) -> &mut FxHashMap<Id, (Vec<usize>, SystemTime)> {
+    fn user_answers_mut(&mut self) -> &mut FxHashMap<Id, (Vec<usize>, Timestamp)> {
         &mut self.user_answers
     }
 
@@ -508,6 +509,7 @@ impl State {
     ) {
         if self.change_state(SlideState::Question, SlideState::Answers) {
             self.start_timer();
+            self.reserve_for_players(watchers.specific_count(ValueKind::Player));
 
             watchers.announce_with(
                 |id, kind| match kind {

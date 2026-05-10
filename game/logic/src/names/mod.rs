@@ -78,7 +78,10 @@ impl NamingScheme for NameStyle {
     }
 }
 
-/// Serialization helper for Names struct
+/// Serialization helper for Names struct. Only compiled when persistence is
+/// enabled, since `Names`' `Deserialize` (via `serde(from = ...)`)
+/// references it.
+#[cfg(feature = "serializable")]
 #[derive(Deserialize)]
 struct NamesSerde {
     mapping: FxHashMap<Id, String>,
@@ -89,20 +92,22 @@ struct NamesSerde {
 /// This struct maintains a bidirectional mapping between player IDs and names,
 /// ensuring that names are unique within a game session and meet content
 /// and length requirements.
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
-#[serde(from = "NamesSerde")]
+#[derive(Debug, Default, Clone)]
+#[cfg_attr(feature = "serializable", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serializable", serde(from = "NamesSerde"))]
 pub struct Names {
     /// Primary mapping from player ID to name
     mapping: FxHashMap<Id, String>,
 
     /// Reverse mapping from name to player ID (not serialized)
-    #[serde(skip_serializing)]
+    #[cfg_attr(feature = "serializable", serde(skip_serializing))]
     reverse_mapping: HashMap<String, Id>,
     /// Set of all existing names for quick uniqueness checks (not serialized)
-    #[serde(skip_serializing)]
+    #[cfg_attr(feature = "serializable", serde(skip_serializing))]
     existing: HashSet<String>,
 }
 
+#[cfg(feature = "serializable")]
 impl From<NamesSerde> for Names {
     /// Reconstructs the Names struct from serialized data
     ///
@@ -353,6 +358,7 @@ mod tests {
         assert_eq!(names.get_id("NonexistentPlayer"), None);
     }
 
+    #[cfg(feature = "serializable")]
     #[test]
     fn test_names_serialization_deserialization() {
         let mut original = Names::default();
@@ -375,6 +381,7 @@ mod tests {
         assert_eq!(deserialized.get_id("Player2"), Some(id2));
     }
 
+    #[cfg(feature = "serializable")]
     #[test]
     fn test_names_reverse_mapping_rebuild() {
         let mut original = Names::default();

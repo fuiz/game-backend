@@ -13,13 +13,13 @@ use std::{
 use itertools::Itertools;
 use rustc_hash::{FxBuildHasher, FxHashMap};
 use serde::{Deserialize, Serialize};
-use web_time::SystemTime;
 
 use crate::{
     fuiz::config::{ScheduleMessageFn, SlideAction},
     leaderboard::Leaderboard,
     session::TunnelFinder,
     teams::TeamManager,
+    time::Timestamp,
     watcher::{Id, ValueKind, Watchers},
 };
 
@@ -51,24 +51,24 @@ pub trait SlideStateManager {
 /// Trait for slide timer management
 pub trait SlideTimer {
     /// Get the answer start time, or None if not started
-    fn answer_start(&self) -> Option<SystemTime>;
+    fn answer_start(&self) -> Option<Timestamp>;
 
     /// Set the answer start time, or None if not started
-    fn set_answer_start(&mut self, time: Option<SystemTime>);
+    fn set_answer_start(&mut self, time: Option<Timestamp>);
 
     /// Start the timer by setting the current time
     fn start_timer(&mut self) {
-        self.set_answer_start(Some(SystemTime::now()));
+        self.set_answer_start(Some(Timestamp::now()));
     }
 
     /// Get the timer start time, or current time if not set
-    fn timer(&self) -> SystemTime {
-        self.answer_start().unwrap_or(SystemTime::now())
+    fn timer(&self) -> Timestamp {
+        self.answer_start().unwrap_or(Timestamp::now())
     }
 
     /// Get the elapsed time since the timer started
     fn elapsed(&self) -> Duration {
-        self.timer().elapsed().unwrap_or_default()
+        self.timer().elapsed()
     }
 }
 
@@ -92,10 +92,10 @@ pub fn calculate_slide_score(
 /// Trait for slides that handle answers and scoring
 pub trait AnswerHandler<AnswerType> {
     /// Get user answers with timestamps
-    fn user_answers(&self) -> &FxHashMap<Id, (AnswerType, SystemTime)>;
+    fn user_answers(&self) -> &FxHashMap<Id, (AnswerType, Timestamp)>;
 
     /// Get mutable access to user answers with timestamps
-    fn user_answers_mut(&mut self) -> &mut FxHashMap<Id, (AnswerType, SystemTime)>;
+    fn user_answers_mut(&mut self) -> &mut FxHashMap<Id, (AnswerType, Timestamp)>;
 
     /// Number of distinct *live* players who have answered.
     ///
@@ -110,8 +110,17 @@ pub trait AnswerHandler<AnswerType> {
     fn live_answered_count_mut(&mut self) -> &mut usize;
 
     /// Get the IDs of players who have answered
-    fn ids_of_who_answered(&self) -> Copied<Keys<'_, Id, (AnswerType, SystemTime)>> {
+    fn ids_of_who_answered(&self) -> Copied<Keys<'_, Id, (AnswerType, Timestamp)>> {
         self.user_answers().keys().copied()
+    }
+
+    /// Pre-allocates answer-map buckets for an upcoming round.
+    ///
+    /// Call when the slide transitions into the answer-accepting state so the
+    /// map's growth from 0 → live-player-count doesn't trigger rawtable
+    /// rehashes on the answer hot path.
+    fn reserve_for_players(&mut self, live_player_count: usize) {
+        self.user_answers_mut().reserve(live_player_count);
     }
 
     /// Records a player's answer with the current timestamp.
@@ -122,7 +131,7 @@ pub trait AnswerHandler<AnswerType> {
         let transformed_answer = self.transform_answer(answer);
         let was_new = self
             .user_answers_mut()
-            .insert(id, (transformed_answer, SystemTime::now()))
+            .insert(id, (transformed_answer, Timestamp::now()))
             .is_none();
         if was_new {
             *self.live_answered_count_mut() += 1;
@@ -220,13 +229,13 @@ pub(crate) fn add_scores_to_leaderboard<
     // Pre-size to the answerer count: there's at most one map entry per
     // distinct group, and the answer set bounds that. Avoids 0→N rawtable
     // rehashes (the old default-sized map cost ~3% of full_game at 4000).
-    let mut earliest_per_group: FxHashMap<Id, (u64, SystemTime)> =
+    let mut earliest_per_group: FxHashMap<Id, (u64, Timestamp)> =
         FxHashMap::with_capacity_and_hasher(slide.user_answers().len(), FxBuildHasher);
     for (id, (answer, instant)) in slide.user_answers() {
         let multiplier = slide.score_multiplier(answer);
         let time_score = calculate_slide_score(
             slide.time_limit(),
-            instant.duration_since(starting_instant).unwrap_or_default(),
+            instant.duration_since(starting_instant),
             slide.max_points(),
         );
         let score = (time_score as f64 * multiplier) as u64;
