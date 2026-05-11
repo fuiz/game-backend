@@ -8,8 +8,8 @@ mod pets;
 mod romans;
 mod word_list;
 
-use bimap::BiHashMap;
 use heck::ToTitleCase;
+use iddqd::{BiHashItem, BiHashMap, bi_upcast};
 use rustc_hash::FxBuildHasher;
 use rustrict::CensorStr;
 use serde::{Deserialize, Serialize};
@@ -77,26 +77,40 @@ impl NamingScheme for NameStyle {
     }
 }
 
-/// Manages player names and their associations with player IDs.
-///
-/// Backed by a bidirectional map (one entry per name, with Rc-shared keys
-/// internally to bimap) so both `id → name` and `name → id` lookups are O(1)
-/// without duplicating string storage in two separate maps.
-#[derive(Debug, Clone)]
+/// One `(id, name)` entry in [`Names`]. Stored once; the `id` and `name`
+/// keys are projected via [`BiHashItem`] so the bimap doesn't duplicate
+/// either side.
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serializable", derive(Serialize, Deserialize))]
-pub struct Names {
-    /// `id ↔ name` bijection. FxHash on both sides since `Id` is uniformly
-    /// random and names are short enough that FxHash beats SipHash for the
-    /// uniqueness lookup on join.
-    map: BiHashMap<Id, String, FxBuildHasher, FxBuildHasher>,
+struct NameEntry {
+    id: Id,
+    name: String,
 }
 
-impl Default for Names {
-    fn default() -> Self {
-        Self {
-            map: BiHashMap::with_hashers(FxBuildHasher, FxBuildHasher),
-        }
+impl BiHashItem for NameEntry {
+    type K1<'a> = Id;
+    type K2<'a> = &'a str;
+
+    fn key1(&self) -> Self::K1<'_> {
+        self.id
     }
+
+    fn key2(&self) -> Self::K2<'_> {
+        &self.name
+    }
+
+    bi_upcast!();
+}
+
+/// Manages player names and their associations with player IDs.
+///
+/// One [`NameEntry`] per name, indexed both by `id` and by `name` via
+/// `iddqd::BiHashMap`. FxHash on the projected keys since `Id` is uniformly
+/// random and names are short.
+#[derive(Debug, Default, Clone)]
+#[cfg_attr(feature = "serializable", derive(Serialize, Deserialize))]
+pub struct Names {
+    map: BiHashMap<NameEntry, FxBuildHasher>,
 }
 
 /// Errors that can occur during name validation and assignment
@@ -130,7 +144,7 @@ impl Names {
     ///
     /// The player's name if they have one assigned, otherwise `None`
     pub fn get_name(&self, id: &Id) -> Option<&str> {
-        self.map.get_by_left(id).map(String::as_str)
+        self.map.get1(id).map(|entry| entry.name.as_str())
     }
 
     /// Retrieves the name associated with a player ID, or "Unknown" if not found
@@ -183,14 +197,19 @@ impl Names {
         if matches!(profanity, Profanity::Censor) && name.is_inappropriate() {
             return Err(Error::Sinful);
         }
-        if self.map.contains_right(name) {
-            return Err(Error::Used);
+        match self.map.insert_unique(NameEntry {
+            id,
+            name: name.to_owned(),
+        }) {
+            Ok(()) => Ok(name),
+            Err(dup) => {
+                if dup.duplicates().iter().any(|duplicate| duplicate.id == id) {
+                    Err(Error::Assigned)
+                } else {
+                    Err(Error::Used)
+                }
+            }
         }
-        if self.map.contains_left(&id) {
-            return Err(Error::Assigned);
-        }
-        self.map.insert(id, name.to_owned());
-        Ok(name)
     }
 
     /// Retrieves the player ID associated with a name
@@ -203,7 +222,7 @@ impl Names {
     ///
     /// The player ID if the name is assigned, otherwise `None`
     pub fn get_id(&self, name: &str) -> Option<Id> {
-        self.map.get_by_right(name).copied()
+        self.map.get2(name).map(|e| e.id)
     }
 }
 
