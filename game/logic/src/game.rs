@@ -865,7 +865,7 @@ impl Game {
         self.watchers
             .update_watcher_value(watcher, Value::Player(watcher::PlayerValue::Individual));
 
-        self.update_player_with_name(watcher, &name, tunnel_finder);
+        self.update_player_with_name(watcher, name, tunnel_finder);
 
         Ok(())
     }

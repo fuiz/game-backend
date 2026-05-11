@@ -271,7 +271,7 @@ impl<N: names::NamingScheme> TeamManager<N> {
             let name = self.name_style.get_plural_name();
 
             if let Ok(unique_name) = names.set_name(team_id, &name, profanity) {
-                return unique_name;
+                return unique_name.to_string();
             }
         }
     }

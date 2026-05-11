@@ -203,7 +203,7 @@ impl Names {
     /// * `Error::Sinful` - Name contains inappropriate content
     /// * `Error::Used` - Name is already taken by another player
     /// * `Error::Assigned` - Player already has a name assigned
-    pub fn set_name(&mut self, id: Id, name: &str, profanity: Profanity) -> Result<String, Error> {
+    pub fn set_name<'a>(&mut self, id: Id, name: &'a str, profanity: Profanity) -> Result<&'a str, Error> {
         if name.len() > 30 {
             return Err(Error::TooLong);
         }
@@ -222,7 +222,7 @@ impl Names {
             Entry::Vacant(v) => {
                 v.insert(name.to_owned());
                 self.reverse_mapping.insert(name.to_owned(), id);
-                Ok(name.to_owned())
+                Ok(name)
             }
         }
     }
