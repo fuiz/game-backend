@@ -4,6 +4,7 @@
 //! tracking points earned by players/teams across multiple questions,
 //! maintaining leaderboards, and providing score summaries and statistics.
 
+#[cfg(feature = "serializable")]
 use itertools::Itertools;
 use rustc_hash::FxHashMap;
 #[cfg(feature = "serializable")]
@@ -162,34 +163,25 @@ impl Leaderboard {
     ///
     /// * `scores` - Slice of (player_id, points_earned) tuples for the round
     pub fn add_scores(&mut self, scores: &[(Id, u64)]) {
-        let mut summary: FxHashMap<Id, u64> = self
+        for (id, points) in scores {
+            self.score_and_position.entry(*id).or_default().0 += points;
+        }
+
+        let mut scores_descending: Vec<(Id, u64)> = self
             .score_and_position
             .iter()
             .map(|(id, (points, _))| (*id, *points))
             .collect();
+        scores_descending.sort_by_key(|(_, points)| std::cmp::Reverse(*points));
 
-        for (id, points) in scores {
-            *summary.entry(*id).or_default() += points;
+        for (position, (id, _)) in scores_descending.iter().enumerate() {
+            if let Some(slot) = self.score_and_position.get_mut(id) {
+                slot.1 = position;
+            }
         }
 
-        let scores_descending = summary
-            .iter()
-            .sorted_by_key(|(_, points)| *points)
-            .rev()
-            .map(|(a, b)| (*a, *b))
-            .collect_vec();
-
-        let mapping = scores_descending
-            .iter()
-            .enumerate()
-            .map(|(position, (id, points))| (*id, (*points, position)))
-            .collect();
-
         self.points_earned.push(scores.to_vec());
-
         self.previous_scores_descending = std::mem::replace(&mut self.scores_descending, scores_descending);
-
-        self.score_and_position = mapping;
     }
 
     /// Returns the current and previous leaderboard standings
