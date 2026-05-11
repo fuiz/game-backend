@@ -29,6 +29,7 @@ enum-map = { version = "2", features = [
 ] } # Efficient enum-to-value mappings
 hashlink = "0.11" # Insertion-ordered hash set/map (linked-list backed, O(1) remove)
 rustc-hash = "2" # Fast non-cryptographic hasher (FxHash) for keys with random/uniform bits
+bimap = { version = "0.6", features = ["serde"] } # Bidirectional map for Names
 serde = { version = "1.0", features = ["derive"] } # Serialization framework
 serde_with = { version = "3", default-features = false } # Additional serde utilities
 derive_more = { version = "2", features = ["full"] } # Extended derive macros

@@ -8,10 +8,9 @@ mod pets;
 mod romans;
 mod word_list;
 
-use std::collections::{HashMap, hash_map::Entry};
-
+use bimap::BiHashMap;
 use heck::ToTitleCase;
-use rustc_hash::FxHashMap;
+use rustc_hash::FxBuildHasher;
 use rustrict::CensorStr;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -78,48 +77,24 @@ impl NamingScheme for NameStyle {
     }
 }
 
-/// Serialization helper for Names struct. Only compiled when persistence is
-/// enabled, since `Names`' `Deserialize` (via `serde(from = ...)`)
-/// references it.
-#[cfg(feature = "serializable")]
-#[derive(Deserialize)]
-struct NamesSerde {
-    mapping: FxHashMap<Id, String>,
-}
-
-/// Manages player names and their associations with player IDs
+/// Manages player names and their associations with player IDs.
 ///
-/// This struct maintains a bidirectional mapping between player IDs and names,
-/// ensuring that names are unique within a game session and meet content
-/// and length requirements.
-#[derive(Debug, Default, Clone)]
+/// Backed by a bidirectional map (one entry per name, with Rc-shared keys
+/// internally to bimap) so both `id → name` and `name → id` lookups are O(1)
+/// without duplicating string storage in two separate maps.
+#[derive(Debug, Clone)]
 #[cfg_attr(feature = "serializable", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "serializable", serde(from = "NamesSerde"))]
 pub struct Names {
-    /// Primary mapping from player ID to name
-    mapping: FxHashMap<Id, String>,
-
-    /// Reverse mapping from name to player ID. Doubles as the uniqueness
-    /// check on [`Self::set_name`] (via `contains_key`).
-    #[cfg_attr(feature = "serializable", serde(skip_serializing))]
-    reverse_mapping: HashMap<String, Id>,
+    /// `id ↔ name` bijection. FxHash on both sides since `Id` is uniformly
+    /// random and names are short enough that FxHash beats SipHash for the
+    /// uniqueness lookup on join.
+    map: BiHashMap<Id, String, FxBuildHasher, FxBuildHasher>,
 }
 
-#[cfg(feature = "serializable")]
-impl From<NamesSerde> for Names {
-    /// Reconstructs the Names struct from serialized data
-    ///
-    /// This rebuilds the reverse mapping from the primary mapping, which is
-    /// necessary since the reverse mapping is not serialized.
-    fn from(serde: NamesSerde) -> Self {
-        let NamesSerde { mapping } = serde;
-        let mut reverse_mapping = HashMap::with_capacity(mapping.len());
-        for (id, name) in &mapping {
-            reverse_mapping.insert(name.to_owned(), *id);
-        }
+impl Default for Names {
+    fn default() -> Self {
         Self {
-            mapping,
-            reverse_mapping,
+            map: BiHashMap::with_hashers(FxBuildHasher, FxBuildHasher),
         }
     }
 }
@@ -155,7 +130,7 @@ impl Names {
     ///
     /// The player's name if they have one assigned, otherwise `None`
     pub fn get_name(&self, id: &Id) -> Option<&str> {
-        self.mapping.get(id).map(String::as_str)
+        self.map.get_by_left(id).map(String::as_str)
     }
 
     /// Retrieves the name associated with a player ID, or "Unknown" if not found
@@ -208,17 +183,14 @@ impl Names {
         if matches!(profanity, Profanity::Censor) && name.is_inappropriate() {
             return Err(Error::Sinful);
         }
-        if self.reverse_mapping.contains_key(name) {
+        if self.map.contains_right(name) {
             return Err(Error::Used);
         }
-        match self.mapping.entry(id) {
-            Entry::Occupied(_) => Err(Error::Assigned),
-            Entry::Vacant(v) => {
-                v.insert(name.to_owned());
-                self.reverse_mapping.insert(name.to_owned(), id);
-                Ok(name)
-            }
+        if self.map.contains_left(&id) {
+            return Err(Error::Assigned);
         }
+        self.map.insert(id, name.to_owned());
+        Ok(name)
     }
 
     /// Retrieves the player ID associated with a name
@@ -231,7 +203,7 @@ impl Names {
     ///
     /// The player ID if the name is assigned, otherwise `None`
     pub fn get_id(&self, name: &str) -> Option<Id> {
-        self.reverse_mapping.get(name).copied()
+        self.map.get_by_right(name).copied()
     }
 }
 
