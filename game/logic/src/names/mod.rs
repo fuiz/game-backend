@@ -8,7 +8,7 @@ mod pets;
 mod romans;
 mod word_list;
 
-use std::collections::{HashMap, HashSet, hash_map::Entry};
+use std::collections::{HashMap, hash_map::Entry};
 
 use heck::ToTitleCase;
 use rustc_hash::FxHashMap;
@@ -99,33 +99,27 @@ pub struct Names {
     /// Primary mapping from player ID to name
     mapping: FxHashMap<Id, String>,
 
-    /// Reverse mapping from name to player ID (not serialized)
+    /// Reverse mapping from name to player ID. Doubles as the uniqueness
+    /// check on [`Self::set_name`] (via `contains_key`).
     #[cfg_attr(feature = "serializable", serde(skip_serializing))]
     reverse_mapping: HashMap<String, Id>,
-    /// Set of all existing names for quick uniqueness checks (not serialized)
-    #[cfg_attr(feature = "serializable", serde(skip_serializing))]
-    existing: HashSet<String>,
 }
 
 #[cfg(feature = "serializable")]
 impl From<NamesSerde> for Names {
     /// Reconstructs the Names struct from serialized data
     ///
-    /// This rebuilds the reverse mapping and existing names set from
-    /// the primary mapping, which is necessary since these fields
-    /// are not serialized.
+    /// This rebuilds the reverse mapping from the primary mapping, which is
+    /// necessary since the reverse mapping is not serialized.
     fn from(serde: NamesSerde) -> Self {
         let NamesSerde { mapping } = serde;
-        let mut reverse_mapping = HashMap::new();
-        let mut existing = HashSet::new();
+        let mut reverse_mapping = HashMap::with_capacity(mapping.len());
         for (id, name) in &mapping {
             reverse_mapping.insert(name.to_owned(), *id);
-            existing.insert(name.to_owned());
         }
         Self {
             mapping,
             reverse_mapping,
-            existing,
         }
     }
 }
@@ -214,7 +208,7 @@ impl Names {
         if matches!(profanity, Profanity::Censor) && name.is_inappropriate() {
             return Err(Error::Sinful);
         }
-        if !self.existing.insert(name.to_owned()) {
+        if self.reverse_mapping.contains_key(name) {
             return Err(Error::Used);
         }
         match self.mapping.entry(id) {
