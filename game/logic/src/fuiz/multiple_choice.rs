@@ -5,7 +5,7 @@
 //! options, allowing players to select one correct answer. The module handles
 //! timing, scoring, answer validation, and result presentation.
 
-use std::{collections::HashMap, time::Duration};
+use std::time::Duration;
 
 use crate::time::Timestamp;
 use garde::Validate;
@@ -377,8 +377,8 @@ impl State {
     ///
     /// Unlike `answer_counts()` which groups by exact `Vec<usize>`, this counts
     /// per-index selections for results display.
-    fn per_index_answer_counts(&self) -> HashMap<usize, usize> {
-        let mut counts = HashMap::new();
+    fn per_index_answer_counts(&self) -> FxHashMap<usize, usize> {
+        let mut counts = FxHashMap::default();
         for (indices, _) in self.user_answers.values() {
             for &i in indices {
                 *counts.entry(i).or_default() += 1;

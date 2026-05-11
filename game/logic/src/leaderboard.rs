@@ -241,7 +241,7 @@ impl Leaderboard {
             .points_earned
             .iter()
             .flat_map(|points_earned| points_earned.iter().map(|(id, _)| *id))
-            .collect::<std::collections::HashSet<_>>()
+            .collect::<rustc_hash::FxHashSet<_>>()
             .len();
 
         FinalSummary {
