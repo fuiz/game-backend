@@ -132,7 +132,7 @@ async fn add(data: Data<AppState>, request: web::Json<GameRequest>) -> impl Resp
     // Stale Detection
     actix_web::rt::spawn(async move {
         loop {
-            actix_web::rt::time::sleep(Duration::from_secs(60)).await;
+            actix_web::rt::time::sleep(Duration::from_mins(1)).await;
             match data.game_manager.is_game_done(game_id) {
                 Ok(false) => {}
                 Ok(true) => {
