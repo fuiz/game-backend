@@ -26,7 +26,7 @@ use super::{
     super::game::IncomingPlayerMessage,
     common::{
         AnswerHandler, QuestionReceiveMessage, SlideStateManager, SlideTimer, add_scores_to_leaderboard,
-        all_players_answered, get_answered_count,
+        get_answered_count,
     },
     config::{TextOrMedia, TextOrMediaRef},
     media::Media,
@@ -351,6 +351,33 @@ impl AnswerHandler<Vec<usize>> for State {
     fn time_limit(&self) -> Option<Duration> {
         self.config.time_limit
     }
+
+    fn answers_count_message(count: usize) -> crate::UpdateMessage<'static> {
+        UpdateMessage::AnswersCount(count).into()
+    }
+
+    fn send_answers_results<F: TunnelFinder>(&mut self, watchers: &Watchers, tunnel_finder: F) {
+        if self.change_state(SlideState::Answers, SlideState::AnswersResults) {
+            let answer_count = self.per_index_answer_counts();
+            watchers.announce(
+                &UpdateMessage::AnswersResults {
+                    answers: self.config.answers.iter().map(|a| a.content.as_ref()).collect_vec(),
+                    results: self
+                        .config
+                        .answers
+                        .iter()
+                        .enumerate()
+                        .map(|(i, a)| AnswerChoiceResult {
+                            correct: a.correct,
+                            count: *answer_count.get(&i).unwrap_or(&0),
+                        })
+                        .collect_vec(),
+                }
+                .into(),
+                tunnel_finder,
+            );
+        }
+    }
 }
 
 impl State {
@@ -543,43 +570,6 @@ impl State {
                 );
             }
             // None = host-paced: no timer, host must press Next
-        }
-    }
-
-    /// Sends the results showing correct answers and player response statistics
-    ///
-    /// This method handles the transition from Answers to `AnswersResults` state,
-    /// revealing the correct answers and showing statistics about how players responded.
-    ///
-    /// # Arguments
-    ///
-    /// * `watchers` - Connection manager for all participants
-    /// * `tunnel_finder` - Function to find communication tunnels for participants
-    ///
-    /// # Type Parameters
-    ///
-    /// * `T` - Type implementing the Tunnel trait for participant communication
-    /// * `F` - Function type for finding tunnels by participant ID
-    fn send_answers_results<F: TunnelFinder>(&mut self, watchers: &Watchers, tunnel_finder: F) {
-        if self.change_state(SlideState::Answers, SlideState::AnswersResults) {
-            let answer_count = self.per_index_answer_counts();
-            watchers.announce(
-                &UpdateMessage::AnswersResults {
-                    answers: self.config.answers.iter().map(|a| a.content.as_ref()).collect_vec(),
-                    results: self
-                        .config
-                        .answers
-                        .iter()
-                        .enumerate()
-                        .map(|(i, a)| AnswerChoiceResult {
-                            correct: a.correct,
-                            count: *answer_count.get(&i).unwrap_or(&0),
-                        })
-                        .collect_vec(),
-                }
-                .into(),
-                tunnel_finder,
-            );
         }
     }
 
@@ -833,15 +823,7 @@ impl QuestionReceiveMessage for State {
 
         if let Some(answer) = answer {
             self.record_answer(watcher_id, answer);
-            if all_players_answered(self, watchers) {
-                self.send_answers_results(watchers, &tunnel_finder);
-            } else {
-                watchers.announce_specific(
-                    ValueKind::Host,
-                    &UpdateMessage::AnswersCount(get_answered_count(self)).into(),
-                    &tunnel_finder,
-                );
-            }
+            self.handle_post_answer(watchers, &tunnel_finder);
         }
     }
 }

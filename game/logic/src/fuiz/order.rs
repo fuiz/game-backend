@@ -24,10 +24,7 @@ use crate::{
 
 use super::{
     super::game::IncomingPlayerMessage,
-    common::{
-        AnswerHandler, QuestionReceiveMessage, SlideStateManager, SlideTimer, add_scores_to_leaderboard,
-        all_players_answered, get_answered_count,
-    },
+    common::{AnswerHandler, QuestionReceiveMessage, SlideStateManager, SlideTimer, add_scores_to_leaderboard},
     media::Media,
 };
 
@@ -294,6 +291,24 @@ impl AnswerHandler<Vec<String>> for State {
     fn time_limit(&self) -> Option<Duration> {
         self.config.time_limit
     }
+
+    fn answers_count_message(count: usize) -> crate::UpdateMessage<'static> {
+        UpdateMessage::AnswersCount(count).into()
+    }
+
+    fn send_answers_results<F: TunnelFinder>(&mut self, watchers: &Watchers, tunnel_finder: F) {
+        if self.change_state(SlideState::Answers, SlideState::AnswersResults) {
+            let correct_count = self.correct_count();
+            watchers.announce(
+                &UpdateMessage::AnswersResults {
+                    answers: &self.config.answers,
+                    results: (correct_count, self.user_answers.len() - correct_count),
+                }
+                .into(),
+                tunnel_finder,
+            );
+        }
+    }
 }
 
 impl State {
@@ -443,35 +458,6 @@ impl State {
         }
     }
 
-    /// Sends the results showing correct order and player statistics
-    ///
-    /// This method handles the transition from Answers to `AnswersResults` state,
-    /// revealing the correct order and showing statistics about player responses.
-    ///
-    /// # Arguments
-    ///
-    /// * `watchers` - Connection manager for all participants
-    /// * `tunnel_finder` - Function to find communication tunnels for participants
-    ///
-    /// # Type Parameters
-    ///
-    /// * `T` - Type implementing the Tunnel trait for participant communication
-    /// * `F` - Function type for finding tunnels by participant ID
-    fn send_answers_results<F: TunnelFinder>(&mut self, watchers: &Watchers, tunnel_finder: F) {
-        if self.change_state(SlideState::Answers, SlideState::AnswersResults) {
-            let correct_count = self.correct_count();
-
-            watchers.announce(
-                &UpdateMessage::AnswersResults {
-                    answers: &self.config.answers,
-                    results: (correct_count, self.user_answers.len() - correct_count),
-                }
-                .into(),
-                tunnel_finder,
-            );
-        }
-    }
-
     /// Generates a synchronization message for a participant joining during the question
     ///
     /// This method creates the appropriate sync message based on the current slide state,
@@ -609,15 +595,7 @@ impl QuestionReceiveMessage for State {
     ) {
         if let IncomingPlayerMessage::StringArrayAnswer(v) = message {
             self.record_answer(watcher_id, v);
-            if all_players_answered(self, watchers) {
-                self.send_answers_results(watchers, &tunnel_finder);
-            } else {
-                watchers.announce_specific(
-                    ValueKind::Host,
-                    &UpdateMessage::AnswersCount(get_answered_count(self)).into(),
-                    &tunnel_finder,
-                );
-            }
+            self.handle_post_answer(watchers, &tunnel_finder);
         }
     }
 }

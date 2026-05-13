@@ -27,10 +27,7 @@ use crate::{
 
 use super::{
     super::game::IncomingPlayerMessage,
-    common::{
-        AnswerHandler, QuestionReceiveMessage, SlideStateManager, SlideTimer, add_scores_to_leaderboard,
-        all_players_answered, get_answered_count,
-    },
+    common::{AnswerHandler, QuestionReceiveMessage, SlideStateManager, SlideTimer, add_scores_to_leaderboard},
     media::Media,
 };
 
@@ -280,6 +277,30 @@ impl AnswerHandler<String> for State {
     fn time_limit(&self) -> Option<Duration> {
         self.config.time_limit
     }
+
+    fn answers_count_message(count: usize) -> crate::UpdateMessage<'static> {
+        UpdateMessage::AnswersCount(count).into()
+    }
+
+    fn send_answers_results<F: TunnelFinder>(&mut self, watchers: &Watchers, tunnel_finder: F) {
+        if self.change_state(SlideState::Answers, SlideState::AnswersResults) {
+            watchers.announce(
+                &UpdateMessage::AnswersResults {
+                    answers: self.cleaned_answers.iter().map(String::as_str).collect_vec(),
+                    results: self
+                        .user_answers
+                        .values()
+                        .map(|(a, _)| a.as_str())
+                        .counts()
+                        .into_iter()
+                        .collect_vec(),
+                    case_sensitive: self.config.case_sensitive,
+                }
+                .into(),
+                tunnel_finder,
+            );
+        }
+    }
 }
 
 impl State {
@@ -408,34 +429,6 @@ impl State {
         }
     }
 
-    /// Sends the results showing correct answers and player statistics
-    ///
-    /// This method handles the transition from Answers to `AnswersResults` state,
-    /// revealing the correct answers and showing statistics about player responses.
-    ///
-    /// # Arguments
-    /// * `watchers` - Connection manager for players and hosts
-    /// * `tunnel_finder` - Function to find communication tunnels
-    fn send_answers_results<F: TunnelFinder>(&mut self, watchers: &Watchers, tunnel_finder: F) {
-        if self.change_state(SlideState::Answers, SlideState::AnswersResults) {
-            watchers.announce(
-                &UpdateMessage::AnswersResults {
-                    answers: self.cleaned_answers.iter().map(String::as_str).collect_vec(),
-                    results: self
-                        .user_answers
-                        .values()
-                        .map(|(a, _)| a.as_str())
-                        .counts()
-                        .into_iter()
-                        .collect_vec(),
-                    case_sensitive: self.config.case_sensitive,
-                }
-                .into(),
-                tunnel_finder,
-            );
-        }
-    }
-
     /// Generates a synchronization message for a newly connected watcher
     ///
     /// # Arguments
@@ -558,15 +551,7 @@ impl QuestionReceiveMessage for State {
     ) {
         if let IncomingPlayerMessage::StringAnswer(v) = message {
             self.record_answer(watcher_id, v);
-            if all_players_answered(self, watchers) {
-                self.send_answers_results(watchers, &tunnel_finder);
-            } else {
-                watchers.announce_specific(
-                    ValueKind::Host,
-                    &UpdateMessage::AnswersCount(get_answered_count(self)).into(),
-                    &tunnel_finder,
-                );
-            }
+            self.handle_post_answer(watchers, &tunnel_finder);
         }
     }
 }

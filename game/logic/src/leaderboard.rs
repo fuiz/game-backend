@@ -4,7 +4,7 @@
 //! tracking points earned by players/teams across multiple questions,
 //! maintaining leaderboards, and providing score summaries and statistics.
 
-#[cfg(feature = "serializable")]
+#[cfg(any(feature = "serializable", test))]
 use itertools::Itertools;
 use rustc_hash::FxHashMap;
 #[cfg(feature = "serializable")]
