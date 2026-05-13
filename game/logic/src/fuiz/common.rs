@@ -38,6 +38,35 @@ pub enum SlideState {
     AnswersResults,
 }
 
+/// Runtime state shared by every slide type: phase, timer, live-answered tally.
+///
+/// Embedded in each slide's `State` as `core: SlideCore` (with `#[serde(flatten)]`
+/// to keep the wire format flat). Slide types implement [`HasSlideCore`] to opt
+/// into the blanket impls of [`SlideStateManager`] / [`SlideTimer`] and the
+/// defaulted `live_answered_count` accessors on [`AnswerHandler`].
+#[derive(Clone, Copy, Debug, Default)]
+#[cfg_attr(feature = "serializable", derive(Serialize, Deserialize))]
+pub struct SlideCore {
+    /// Current phase of the slide presentation.
+    pub state: SlideState,
+    /// Time when answers were first accepted, or `None` if not yet started.
+    pub answer_start: Option<Timestamp>,
+    /// Distinct live players who have answered. Maintained incrementally by
+    /// [`AnswerHandler::record_answer`], [`AnswerHandler::mark_watcher_left`],
+    /// and [`AnswerHandler::mark_watcher_returned`].
+    #[cfg_attr(feature = "serializable", serde(default))]
+    pub live_answered_count: usize,
+}
+
+/// Accessor trait that lets each slide expose its [`SlideCore`] so the
+/// state/timer/count traits get free blanket implementations.
+pub trait HasSlideCore {
+    /// Shared read access to the slide's runtime core.
+    fn slide_core(&self) -> &SlideCore;
+    /// Shared write access to the slide's runtime core.
+    fn slide_core_mut(&mut self) -> &mut SlideCore;
+}
+
 /// Trait for basic slide state management functionality
 pub trait SlideStateManager {
     /// Get the current slide state
@@ -46,6 +75,22 @@ pub trait SlideStateManager {
     /// Attempt to change state from one to another
     /// Returns true if successful, false if current state doesn't match expected
     fn change_state(&mut self, before: SlideState, after: SlideState) -> bool;
+}
+
+impl<T: HasSlideCore> SlideStateManager for T {
+    fn state(&self) -> SlideState {
+        self.slide_core().state
+    }
+
+    fn change_state(&mut self, before: SlideState, after: SlideState) -> bool {
+        let core = self.slide_core_mut();
+        if core.state == before {
+            core.state = after;
+            true
+        } else {
+            false
+        }
+    }
 }
 
 /// Trait for slide timer management
@@ -72,6 +117,16 @@ pub trait SlideTimer {
     }
 }
 
+impl<T: HasSlideCore> SlideTimer for T {
+    fn answer_start(&self) -> Option<Timestamp> {
+        self.slide_core().answer_start
+    }
+
+    fn set_answer_start(&mut self, time: Option<Timestamp>) {
+        self.slide_core_mut().answer_start = time;
+    }
+}
+
 /// Calculate score based on timing - shared function used by all slide types
 ///
 /// When `full_duration` is `None` (host-paced mode), full points are awarded
@@ -90,7 +145,7 @@ pub fn calculate_slide_score(
 }
 
 /// Trait for slides that handle answers and scoring
-pub trait AnswerHandler<AnswerType> {
+pub trait AnswerHandler<AnswerType>: HasSlideCore {
     /// Get user answers with timestamps
     fn user_answers(&self) -> &FxHashMap<Id, (AnswerType, Timestamp)>;
 
@@ -103,11 +158,14 @@ pub trait AnswerHandler<AnswerType> {
     /// [`Self::mark_watcher_left`], and [`Self::mark_watcher_returned`] so
     /// that "all answered" / "answered count" checks are O(1) instead of
     /// scanning the watcher set per answer.
-    fn live_answered_count(&self) -> usize;
+    fn live_answered_count(&self) -> usize {
+        self.slide_core().live_answered_count
+    }
 
-    /// Mutable handle to the live-answered counter. Implementors expose the
-    /// same field that [`Self::live_answered_count`] reads.
-    fn live_answered_count_mut(&mut self) -> &mut usize;
+    /// Mutable handle to the live-answered counter.
+    fn live_answered_count_mut(&mut self) -> &mut usize {
+        &mut self.slide_core_mut().live_answered_count
+    }
 
     /// Get the IDs of players who have answered
     fn ids_of_who_answered(&self) -> Copied<Keys<'_, Id, (AnswerType, Timestamp)>> {
@@ -241,20 +299,14 @@ pub trait AnswerHandler<AnswerType> {
 /// are no teams). Replaces an earlier `itertools::into_grouping_map_by` form
 /// whose internal `HashMap` used the default SipHash; the explicit `FxHashMap`
 /// here removes ~5% of full-game CPU at 4000 players.
-pub(crate) fn add_scores_to_leaderboard<
-    F: TunnelFinder,
-    AnswerType: Clone,
-    A: AnswerHandler<AnswerType>,
-    T: SlideTimer,
->(
+pub(crate) fn add_scores_to_leaderboard<F: TunnelFinder, AnswerType: Clone, A: AnswerHandler<AnswerType>>(
     slide: &A,
-    timer: &T,
     leaderboard: &mut Leaderboard,
     watchers: &Watchers,
     team_manager: Option<&TeamManager<crate::names::NameStyle>>,
     tunnel_finder: F,
 ) {
-    let starting_instant = timer.timer();
+    let starting_instant = slide.timer();
 
     let leaderboard_id = |player_id: Id| match &team_manager {
         Some(tm) => tm.get_team(player_id).unwrap_or(player_id),
@@ -473,7 +525,7 @@ mod tests {
     /// be tested without a real `Watchers` fan-out.
     struct MockSlide {
         answers: FxHashMap<Id, (bool, Timestamp)>,
-        live_answered: usize,
+        core: SlideCore,
         time_limit: Option<Duration>,
         max_points: u64,
         last_count_tick: Cell<Option<usize>>,
@@ -484,12 +536,21 @@ mod tests {
         fn new() -> Self {
             Self {
                 answers: FxHashMap::default(),
-                live_answered: 0,
+                core: SlideCore::default(),
                 time_limit: Some(Duration::from_secs(10)),
                 max_points: 1000,
                 last_count_tick: Cell::new(None),
                 results_sent: Cell::new(false),
             }
+        }
+    }
+
+    impl HasSlideCore for MockSlide {
+        fn slide_core(&self) -> &SlideCore {
+            &self.core
+        }
+        fn slide_core_mut(&mut self) -> &mut SlideCore {
+            &mut self.core
         }
     }
 
@@ -499,12 +560,6 @@ mod tests {
         }
         fn user_answers_mut(&mut self) -> &mut FxHashMap<Id, (bool, Timestamp)> {
             &mut self.answers
-        }
-        fn live_answered_count(&self) -> usize {
-            self.live_answered
-        }
-        fn live_answered_count_mut(&mut self) -> &mut usize {
-            &mut self.live_answered
         }
         fn is_correct_answer(&self, answer: &bool) -> bool {
             *answer
@@ -809,7 +864,7 @@ mod tests {
 
         // Drive the live-answered count to 32 — the first boundary above the
         // small-value shortcut, so the throttle should fire here.
-        slide.live_answered = 32;
+        slide.core.live_answered_count = 32;
 
         slide.handle_post_answer(&watchers, noop_tunnel_finder());
 
@@ -823,7 +878,7 @@ mod tests {
         let watchers = populate_watchers(100);
 
         // 33 falls inside the 32..63 band (step 2) but isn't a multiple of 2.
-        slide.live_answered = 33;
+        slide.core.live_answered_count = 33;
 
         slide.handle_post_answer(&watchers, noop_tunnel_finder());
 

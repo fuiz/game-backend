@@ -24,7 +24,10 @@ use crate::{
 
 use super::{
     super::game::IncomingPlayerMessage,
-    common::{AnswerHandler, QuestionReceiveMessage, SlideStateManager, SlideTimer, add_scores_to_leaderboard},
+    common::{
+        AnswerHandler, HasSlideCore, QuestionReceiveMessage, SlideCore, SlideStateManager, SlideTimer,
+        add_scores_to_leaderboard,
+    },
     media::Media,
 };
 
@@ -99,13 +102,9 @@ pub struct State {
     shuffled_answers: Vec<String>,
     /// Player arrangements with submission timestamps
     user_answers: FxHashMap<Id, (Vec<String>, Timestamp)>,
-    /// Distinct live players who have answered. Maintained incrementally.
-    #[cfg_attr(feature = "serializable", serde(default))]
-    live_answered_count: usize,
-    /// Time when the ordering interface was first displayed
-    answer_start: Option<Timestamp>,
-    /// Current phase of the slide presentation
-    state: SlideState,
+    /// Shared runtime core: slide phase, answer-start timestamp, live-answered tally.
+    #[cfg_attr(feature = "serializable", serde(flatten))]
+    core: SlideCore,
 }
 
 impl SlideConfig {
@@ -122,9 +121,7 @@ impl SlideConfig {
             config: self.clone(),
             shuffled_answers: Vec::new(),
             user_answers: FxHashMap::default(),
-            live_answered_count: 0,
-            answer_start: None,
-            state: SlideState::Unstarted,
+            core: SlideCore::default(),
         }
     }
 }
@@ -238,28 +235,13 @@ pub enum SyncMessage<'a> {
     },
 }
 
-impl SlideStateManager for State {
-    fn state(&self) -> SlideState {
-        self.state
+impl HasSlideCore for State {
+    fn slide_core(&self) -> &SlideCore {
+        &self.core
     }
 
-    fn change_state(&mut self, before: SlideState, after: SlideState) -> bool {
-        if self.state == before {
-            self.state = after;
-            true
-        } else {
-            false
-        }
-    }
-}
-
-impl SlideTimer for State {
-    fn answer_start(&self) -> Option<Timestamp> {
-        self.answer_start
-    }
-
-    fn set_answer_start(&mut self, time: Option<Timestamp>) {
-        self.answer_start = time;
+    fn slide_core_mut(&mut self) -> &mut SlideCore {
+        &mut self.core
     }
 }
 
@@ -270,14 +252,6 @@ impl AnswerHandler<Vec<String>> for State {
 
     fn user_answers_mut(&mut self) -> &mut FxHashMap<Id, (Vec<String>, Timestamp)> {
         &mut self.user_answers
-    }
-
-    fn live_answered_count(&self) -> usize {
-        self.live_answered_count
-    }
-
-    fn live_answered_count_mut(&mut self) -> &mut usize {
-        &mut self.live_answered_count
     }
 
     fn is_correct_answer(&self, answer: &Vec<String>) -> bool {
@@ -578,7 +552,7 @@ impl QuestionReceiveMessage for State {
                 self.send_answers_results(watchers, tunnel_finder);
             }
             SlideState::AnswersResults => {
-                add_scores_to_leaderboard(self, self, leaderboard, watchers, team_manager, tunnel_finder);
+                add_scores_to_leaderboard(self, leaderboard, watchers, team_manager, tunnel_finder);
                 return SlideAction::Next { schedule_message };
             }
         }
