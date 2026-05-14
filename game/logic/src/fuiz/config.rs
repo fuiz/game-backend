@@ -351,9 +351,15 @@ impl SlideState {
         count: usize,
     ) -> SlideAction<S> {
         match self {
-            Self::MultipleChoice(s) => {
-                s.receive_alarm(watchers, team_manager, schedule_message, tunnel_finder, message, index)
-            }
+            Self::MultipleChoice(s) => s.receive_alarm(
+                watchers,
+                team_manager,
+                schedule_message,
+                tunnel_finder,
+                message,
+                index,
+                count,
+            ),
             Self::TypeAnswer(s) => s.receive_alarm(watchers, schedule_message, tunnel_finder, message, index, count),
             Self::Order(s) => s.receive_alarm(watchers, schedule_message, tunnel_finder, message, index, count),
         }
@@ -727,9 +733,9 @@ mod tests {
         let tunnel_finder = create_mock_tunnel_finder();
         let mut schedule_message = |_msg: AlarmMessage, _duration: std::time::Duration| {};
 
-        let alarm_message = AlarmMessage::TypeAnswer(type_answer::AlarmMessage::ProceedFromSlideIntoSlide {
+        let alarm_message = AlarmMessage::TypeAnswer(type_answer::AlarmMessage {
             index: 0,
-            to: type_answer::SlideState::Question,
+            to: type_answer::Phase::Question,
         });
 
         let _result = state.receive_alarm(
@@ -753,9 +759,9 @@ mod tests {
         let tunnel_finder = create_mock_tunnel_finder();
         let mut schedule_message = |_msg: AlarmMessage, _duration: std::time::Duration| {};
 
-        let alarm_message = AlarmMessage::Order(order::AlarmMessage::ProceedFromSlideIntoSlide {
+        let alarm_message = AlarmMessage::Order(order::AlarmMessage {
             index: 0,
-            to: order::SlideState::Question,
+            to: order::Phase::Question,
         });
 
         let _result = state.receive_alarm(
@@ -779,9 +785,9 @@ mod tests {
         let tunnel_finder = create_mock_tunnel_finder();
         let mut schedule_message = |_msg: AlarmMessage, _duration: std::time::Duration| {};
 
-        let alarm_message = AlarmMessage::MultipleChoice(multiple_choice::AlarmMessage::ProceedFromSlideIntoSlide {
+        let alarm_message = AlarmMessage::MultipleChoice(multiple_choice::AlarmMessage {
             index: 0,
-            to: multiple_choice::SlideState::Question,
+            to: multiple_choice::Phase::Question,
         });
 
         let _result = state.receive_alarm(

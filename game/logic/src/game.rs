@@ -1099,15 +1099,15 @@ impl Game {
         tunnel_finder: F,
     ) {
         match message {
-            AlarmMessage::MultipleChoice(multiple_choice::AlarmMessage::ProceedFromSlideIntoSlide {
+            AlarmMessage::MultipleChoice(multiple_choice::AlarmMessage {
                 index: slide_index,
                 to: _,
             })
-            | AlarmMessage::TypeAnswer(type_answer::AlarmMessage::ProceedFromSlideIntoSlide {
+            | AlarmMessage::TypeAnswer(type_answer::AlarmMessage {
                 index: slide_index,
                 to: _,
             })
-            | AlarmMessage::Order(order::AlarmMessage::ProceedFromSlideIntoSlide {
+            | AlarmMessage::Order(order::AlarmMessage {
                 index: slide_index,
                 to: _,
             }) => match &mut self.state {
@@ -2254,12 +2254,10 @@ mod tests {
         game.play(schedule_message, tunnel_finder);
 
         // Send alarm for wrong slide index - should be ignored
-        let alarm = crate::AlarmMessage::MultipleChoice(
-            crate::fuiz::multiple_choice::AlarmMessage::ProceedFromSlideIntoSlide {
-                index: 999, // Wrong index
-                to: crate::fuiz::multiple_choice::SlideState::Question,
-            },
-        );
+        let alarm = crate::AlarmMessage::MultipleChoice(crate::fuiz::multiple_choice::AlarmMessage {
+            index: 999, // Wrong index
+            to: crate::fuiz::multiple_choice::Phase::Question,
+        });
 
         game.receive_alarm(&alarm, schedule_message, tunnel_finder);
 
@@ -3099,12 +3097,10 @@ mod tests {
         game.play(schedule_message, tunnel_finder);
 
         // Send alarm for correct slide index
-        let alarm = crate::AlarmMessage::MultipleChoice(
-            crate::fuiz::multiple_choice::AlarmMessage::ProceedFromSlideIntoSlide {
-                index: 0, // Correct index
-                to: crate::fuiz::multiple_choice::SlideState::Question,
-            },
-        );
+        let alarm = crate::AlarmMessage::MultipleChoice(crate::fuiz::multiple_choice::AlarmMessage {
+            index: 0, // Correct index
+            to: crate::fuiz::multiple_choice::Phase::Question,
+        });
 
         // Should handle the alarm for the current slide
         game.receive_alarm(&alarm, schedule_message, tunnel_finder);
@@ -3122,12 +3118,10 @@ mod tests {
         let schedule_message = |_: crate::AlarmMessage, _: std::time::Duration| {};
 
         // Send alarm while not in slide state - should be ignored
-        let alarm = crate::AlarmMessage::MultipleChoice(
-            crate::fuiz::multiple_choice::AlarmMessage::ProceedFromSlideIntoSlide {
-                index: 0,
-                to: crate::fuiz::multiple_choice::SlideState::Question,
-            },
-        );
+        let alarm = crate::AlarmMessage::MultipleChoice(crate::fuiz::multiple_choice::AlarmMessage {
+            index: 0,
+            to: crate::fuiz::multiple_choice::Phase::Question,
+        });
 
         game.receive_alarm(&alarm, schedule_message, tunnel_finder);
         // Should remain in WaitingScreen
@@ -3263,16 +3257,15 @@ mod tests {
     #[test]
     fn test_game_alarm_message_variants() {
         // Test that we can construct different alarm message types
-        let type_answer_alarm =
-            crate::AlarmMessage::TypeAnswer(crate::fuiz::type_answer::AlarmMessage::ProceedFromSlideIntoSlide {
-                index: 0,
-                to: crate::fuiz::type_answer::SlideState::Question,
-            });
+        let type_answer_alarm = crate::AlarmMessage::TypeAnswer(crate::fuiz::type_answer::AlarmMessage {
+            index: 0,
+            to: crate::fuiz::type_answer::Phase::Question,
+        });
         assert!(matches!(type_answer_alarm, crate::AlarmMessage::TypeAnswer(_)));
 
-        let order_alarm = crate::AlarmMessage::Order(crate::fuiz::order::AlarmMessage::ProceedFromSlideIntoSlide {
+        let order_alarm = crate::AlarmMessage::Order(crate::fuiz::order::AlarmMessage {
             index: 0,
-            to: crate::fuiz::order::SlideState::Question,
+            to: crate::fuiz::order::Phase::Question,
         });
         assert!(matches!(order_alarm, crate::AlarmMessage::Order(_)));
     }

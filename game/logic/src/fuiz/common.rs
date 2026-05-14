@@ -23,32 +23,33 @@ use crate::{
     watcher::{Id, ValueKind, Watchers},
 };
 
-/// Common slide states shared by all question types
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[repr(u8)]
-pub enum SlideState {
-    /// Initial state before the slide has started
-    #[default]
-    Unstarted,
-    /// Displaying the question without answers
-    Question,
-    /// Accepting answers from players
-    Answers,
-    /// Displaying results with correct answers and statistics
-    AnswersResults,
+/// A slide's phase enum. Each slide type owns its own `Phase`; common dispatch
+/// is generic over this trait so the state machine isn't hard-coded.
+///
+/// `Default` yields the initial (pre-play) phase; [`Self::next`] returns the
+/// successor phase in sequence, or `None` for a terminal phase (from which
+/// the host's "Next" command advances to the next slide).
+pub trait Phase: Copy + Eq + std::fmt::Debug + Default + Serialize + serde::de::DeserializeOwned + 'static {
+    /// Next phase in sequence, or `None` if this is the terminal phase.
+    fn next(self) -> Option<Self>;
 }
 
 /// Runtime state shared by every slide type: phase, timer, live-answered tally.
 ///
-/// Embedded in each slide's `State` as `core: SlideCore` (with `#[serde(flatten)]`
-/// to keep the wire format flat). Slide types implement [`HasSlideCore`] to opt
-/// into the blanket impls of [`SlideStateManager`] / [`SlideTimer`] and the
-/// defaulted `live_answered_count` accessors on [`AnswerHandler`].
-#[derive(Clone, Copy, Debug, Default)]
+/// Embedded in each slide's `State` as `core: SlideCore<Self::Phase>` (with
+/// `#[serde(flatten)]` to keep the wire format flat). Slide types implement
+/// [`HasSlideCore`] to opt into the blanket impls of [`SlideStateManager`] /
+/// [`SlideTimer`] and the defaulted `live_answered_count` accessors on
+/// [`AnswerHandler`].
+#[derive(Clone, Copy, Debug)]
 #[cfg_attr(feature = "serializable", derive(Serialize, Deserialize))]
-pub struct SlideCore {
+#[cfg_attr(
+    feature = "serializable",
+    serde(bound(serialize = "P: Phase", deserialize = "P: Phase"))
+)]
+pub struct SlideCore<P: Phase> {
     /// Current phase of the slide presentation.
-    pub state: SlideState,
+    pub state: P,
     /// Time when answers were first accepted, or `None` if not yet started.
     pub answer_start: Option<Timestamp>,
     /// Distinct live players who have answered. Maintained incrementally by
@@ -58,31 +59,55 @@ pub struct SlideCore {
     pub live_answered_count: usize,
 }
 
+impl<P: Phase> Default for SlideCore<P> {
+    fn default() -> Self {
+        Self {
+            state: P::default(),
+            answer_start: None,
+            live_answered_count: 0,
+        }
+    }
+}
+
+/// Alarm payload used by every slide type to schedule a phase transition.
+///
+/// The outer [`crate::AlarmMessage`] discriminates which slide-type the
+/// payload belongs to (and therefore which `Phase` type to decode).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProceedFromSlideIntoSlide<P> {
+    /// Index of the slide being transitioned.
+    pub index: usize,
+    /// Target phase to transition into.
+    pub to: P,
+}
+
 /// Accessor trait that lets each slide expose its [`SlideCore`] so the
 /// state/timer/count traits get free blanket implementations.
 pub trait HasSlideCore {
+    /// The phase enum this slide uses.
+    type Phase: Phase;
     /// Shared read access to the slide's runtime core.
-    fn slide_core(&self) -> &SlideCore;
+    fn slide_core(&self) -> &SlideCore<Self::Phase>;
     /// Shared write access to the slide's runtime core.
-    fn slide_core_mut(&mut self) -> &mut SlideCore;
+    fn slide_core_mut(&mut self) -> &mut SlideCore<Self::Phase>;
 }
 
 /// Trait for basic slide state management functionality
-pub trait SlideStateManager {
+pub trait SlideStateManager: HasSlideCore {
     /// Get the current slide state
-    fn state(&self) -> SlideState;
+    fn state(&self) -> Self::Phase;
 
     /// Attempt to change state from one to another
     /// Returns true if successful, false if current state doesn't match expected
-    fn change_state(&mut self, before: SlideState, after: SlideState) -> bool;
+    fn change_state(&mut self, before: Self::Phase, after: Self::Phase) -> bool;
 }
 
 impl<T: HasSlideCore> SlideStateManager for T {
-    fn state(&self) -> SlideState {
+    fn state(&self) -> Self::Phase {
         self.slide_core().state
     }
 
-    fn change_state(&mut self, before: SlideState, after: SlideState) -> bool {
+    fn change_state(&mut self, before: Self::Phase, after: Self::Phase) -> bool {
         let core = self.slide_core_mut();
         if core.state == before {
             core.state = after;
@@ -386,6 +411,88 @@ pub fn should_announce_answered_count(count: usize) -> bool {
     count.leading_zeros() + count.trailing_zeros() >= usize::BITS - SIGNIFICANT_BITS
 }
 
+/// Phase-driven slide lifecycle. Each slide impls `enter_phase` (side
+/// effects when arriving at a phase: announce, schedule next alarm, etc.);
+/// the defaulted methods then provide host-next and alarm dispatch by
+/// walking [`Phase::next`].
+///
+/// The generic `enter_phase` signature is the union of every slide's needs
+/// (e.g. `team_manager` is only consumed by [`crate::fuiz::multiple_choice`]
+/// but appears here so the trait is uniform). Slides that don't need a
+/// parameter just bind it as `_`.
+pub(crate) trait PhasedSlide<AnswerType: Clone>: AnswerHandler<AnswerType> + SlideStateManager + Sized {
+    /// Enter `phase`: change state, announce the per-phase payload, and
+    /// schedule the alarm for the *next* phase if applicable.
+    ///
+    /// If the current state doesn't match the phase's expected predecessor
+    /// (i.e. `change_state` would fail), implementations must short-circuit
+    /// and do nothing — this preserves idempotence under racing alarms /
+    /// host-next clicks.
+    fn enter_phase<F: TunnelFinder, S: ScheduleMessageFn>(
+        &mut self,
+        phase: Self::Phase,
+        team_manager: Option<&TeamManager<crate::names::NameStyle>>,
+        watchers: &Watchers,
+        schedule_message: S,
+        tunnel_finder: F,
+        index: usize,
+        count: usize,
+    );
+
+    /// Default host-next: walks to the next phase, or scores and advances
+    /// the slide when the current phase is terminal.
+    fn default_receive_host_next<F: TunnelFinder, S: ScheduleMessageFn>(
+        &mut self,
+        leaderboard: &mut Leaderboard,
+        watchers: &Watchers,
+        team_manager: Option<&TeamManager<crate::names::NameStyle>>,
+        schedule_message: S,
+        tunnel_finder: F,
+        index: usize,
+        count: usize,
+    ) -> SlideAction<S> {
+        if let Some(next) = self.state().next() {
+            self.enter_phase(
+                next,
+                team_manager,
+                watchers,
+                schedule_message,
+                tunnel_finder,
+                index,
+                count,
+            );
+            SlideAction::Stay
+        } else {
+            add_scores_to_leaderboard(self, leaderboard, watchers, team_manager, &tunnel_finder);
+            SlideAction::Next { schedule_message }
+        }
+    }
+
+    /// Default alarm handler: just enters the target phase. Stays on the
+    /// slide — alarms never auto-advance past the terminal phase.
+    fn default_receive_alarm<F: TunnelFinder, S: ScheduleMessageFn>(
+        &mut self,
+        phase: Self::Phase,
+        team_manager: Option<&TeamManager<crate::names::NameStyle>>,
+        watchers: &Watchers,
+        schedule_message: S,
+        tunnel_finder: F,
+        index: usize,
+        count: usize,
+    ) -> SlideAction<S> {
+        self.enter_phase(
+            phase,
+            team_manager,
+            watchers,
+            schedule_message,
+            tunnel_finder,
+            index,
+            count,
+        );
+        SlideAction::Stay
+    }
+}
+
 /// Common interface for all question types to handle incoming messages
 ///
 /// This trait abstracts the message handling logic that is common across
@@ -519,13 +626,30 @@ mod tests {
     use super::*;
     use crate::watcher::{PlayerValue, Value, Watchers};
 
+    /// Phase enum used only by the in-module unit tests.
+    #[derive(Copy, Clone, Eq, PartialEq, Debug, Default, Serialize, Deserialize)]
+    enum MockPhase {
+        #[default]
+        Unstarted,
+        Done,
+    }
+
+    impl Phase for MockPhase {
+        fn next(self) -> Option<Self> {
+            match self {
+                Self::Unstarted => Some(Self::Done),
+                Self::Done => None,
+            }
+        }
+    }
+
     /// Minimal `AnswerHandler` for exercising the trait's defaulted methods.
     /// Uses `bool` as the answer type: `true` = correct, `false` = incorrect.
     /// `Cell` fields capture trait-method dispatch so `handle_post_answer` can
     /// be tested without a real `Watchers` fan-out.
     struct MockSlide {
         answers: FxHashMap<Id, (bool, Timestamp)>,
-        core: SlideCore,
+        core: SlideCore<MockPhase>,
         time_limit: Option<Duration>,
         max_points: u64,
         last_count_tick: Cell<Option<usize>>,
@@ -546,10 +670,11 @@ mod tests {
     }
 
     impl HasSlideCore for MockSlide {
-        fn slide_core(&self) -> &SlideCore {
+        type Phase = MockPhase;
+        fn slide_core(&self) -> &SlideCore<MockPhase> {
             &self.core
         }
-        fn slide_core_mut(&mut self) -> &mut SlideCore {
+        fn slide_core_mut(&mut self) -> &mut SlideCore<MockPhase> {
             &mut self.core
         }
     }

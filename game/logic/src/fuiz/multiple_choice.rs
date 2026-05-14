@@ -25,8 +25,8 @@ use crate::{
 use super::{
     super::game::IncomingPlayerMessage,
     common::{
-        AnswerHandler, HasSlideCore, QuestionReceiveMessage, SlideCore, SlideStateManager, SlideTimer,
-        add_scores_to_leaderboard, get_answered_count,
+        AnswerHandler, HasSlideCore, PhasedSlide, ProceedFromSlideIntoSlide, QuestionReceiveMessage, SlideCore,
+        SlideStateManager, SlideTimer, get_answered_count,
     },
     config::{TextOrMedia, TextOrMediaRef},
     media::Media,
@@ -42,8 +42,31 @@ pub enum AnswerMode {
     MultipleAnswers,
 }
 
-// Re-export SlideState publicly from slide_traits
-pub use super::common::SlideState;
+/// Lifecycle phases for a multiple-choice slide.
+#[derive(Copy, Clone, Eq, PartialEq, Debug, Default, Serialize, Deserialize)]
+#[repr(u8)]
+pub enum Phase {
+    /// Initial state before the slide has started.
+    #[default]
+    Unstarted,
+    /// Displaying the question without answer options.
+    Question,
+    /// Revealing answer options and accepting player selections.
+    Answers,
+    /// Displaying results with correct answers and statistics.
+    AnswersResults,
+}
+
+impl super::common::Phase for Phase {
+    fn next(self) -> Option<Self> {
+        match self {
+            Self::Unstarted => Some(Self::Question),
+            Self::Question => Some(Self::Answers),
+            Self::Answers => Some(Self::AnswersResults),
+            Self::AnswersResults => None,
+        }
+    }
+}
 
 /// Configuration for a multiple choice question slide
 ///
@@ -99,7 +122,7 @@ pub struct State {
     /// Shared runtime core: slide phase, answer-start timestamp, live-answered tally.
     /// `serde(flatten)` keeps the wire format identical to the pre-refactor layout.
     #[cfg_attr(feature = "serializable", serde(flatten))]
-    core: SlideCore,
+    core: SlideCore<Phase>,
 }
 
 impl SlideConfig {
@@ -174,20 +197,8 @@ pub enum UpdateMessage<'a> {
     },
 }
 
-/// Alarm messages for timed events in multiple choice questions
-///
-/// These messages are used internally to trigger state transitions
-/// at scheduled times during question presentation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum AlarmMessage {
-    /// Triggers a transition from one slide state to another
-    ProceedFromSlideIntoSlide {
-        /// Index of the slide being transitioned
-        index: usize,
-        /// Target state to transition to
-        to: SlideState,
-    },
-}
+/// Scheduled phase-transition alarm for multiple-choice slides.
+pub type AlarmMessage = ProceedFromSlideIntoSlide<Phase>;
 
 /// Synchronization messages for participants joining during multiple choice questions
 ///
@@ -273,11 +284,13 @@ pub struct AnswerChoiceResult {
 }
 
 impl HasSlideCore for State {
-    fn slide_core(&self) -> &SlideCore {
+    type Phase = Phase;
+
+    fn slide_core(&self) -> &SlideCore<Phase> {
         &self.core
     }
 
-    fn slide_core_mut(&mut self) -> &mut SlideCore {
+    fn slide_core_mut(&mut self) -> &mut SlideCore<Phase> {
         &mut self.core
     }
 }
@@ -327,7 +340,7 @@ impl AnswerHandler<Vec<usize>> for State {
     }
 
     fn send_answers_results<F: TunnelFinder>(&mut self, watchers: &Watchers, tunnel_finder: F) {
-        if self.change_state(SlideState::Answers, SlideState::AnswersResults) {
+        if self.change_state(Phase::Answers, Phase::AnswersResults) {
             let answer_count = self.per_index_answer_counts();
             watchers.announce(
                 &UpdateMessage::AnswersResults {
@@ -346,6 +359,103 @@ impl AnswerHandler<Vec<usize>> for State {
                 .into(),
                 tunnel_finder,
             );
+        }
+    }
+}
+
+impl PhasedSlide<Vec<usize>> for State {
+    fn enter_phase<F: TunnelFinder, S: ScheduleMessageFn>(
+        &mut self,
+        phase: Phase,
+        team_manager: Option<&TeamManager<crate::names::NameStyle>>,
+        watchers: &Watchers,
+        schedule_message: S,
+        tunnel_finder: F,
+        index: usize,
+        count: usize,
+    ) {
+        match phase {
+            Phase::Unstarted => {}
+            Phase::Question => {
+                if !self.change_state(Phase::Unstarted, Phase::Question) {
+                    return;
+                }
+                watchers.announce(
+                    &UpdateMessage::QuestionAnnouncement {
+                        index,
+                        count,
+                        question: &self.config.title,
+                        media: self.config.media.as_ref(),
+                        duration: self.config.introduce_question,
+                    }
+                    .into(),
+                    &tunnel_finder,
+                );
+                if let Some(d) = self.config.introduce_question {
+                    if d.is_zero() {
+                        self.enter_phase(
+                            Phase::Answers,
+                            team_manager,
+                            watchers,
+                            schedule_message,
+                            tunnel_finder,
+                            index,
+                            count,
+                        );
+                    } else {
+                        schedule_message(
+                            AlarmMessage {
+                                index,
+                                to: Phase::Answers,
+                            }
+                            .into(),
+                            d,
+                        );
+                    }
+                }
+            }
+            Phase::Answers => {
+                if !self.change_state(Phase::Question, Phase::Answers) {
+                    return;
+                }
+                self.start_timer();
+                self.reserve_for_players(watchers.specific_count(ValueKind::Player));
+
+                watchers.announce_with(
+                    |id, kind| match kind {
+                        ValueKind::Host | ValueKind::Player => Some(
+                            UpdateMessage::AnswersAnnouncement {
+                                duration: self.config.time_limit,
+                                answers: self.get_answers_for_player(
+                                    id,
+                                    kind,
+                                    team_manager.map_or(1, |tm| tm.alive_team_size(id, &tunnel_finder)),
+                                    team_manager.map_or(0, |tm| tm.alive_team_index(id, &tunnel_finder)),
+                                    team_manager.is_some(),
+                                ),
+                                answer_mode: self.config.answer_mode,
+                            }
+                            .into(),
+                        ),
+                        ValueKind::Unassigned => None,
+                    },
+                    &tunnel_finder,
+                );
+
+                if let Some(time_limit) = self.config.time_limit {
+                    schedule_message(
+                        AlarmMessage {
+                            index,
+                            to: Phase::AnswersResults,
+                        }
+                        .into(),
+                        time_limit,
+                    );
+                }
+            }
+            Phase::AnswersResults => {
+                self.send_answers_results(watchers, tunnel_finder);
+            }
         }
     }
 }
@@ -384,26 +494,7 @@ impl State {
         counts
     }
 
-    /// Starts the multiple choice slide by sending initial question announcements
-    ///
-    /// This method initiates the question flow by transitioning to the question phase
-    /// and announcing the question to all participants. It schedules the transition
-    /// to the answer phase based on the configured introduction duration.
-    ///
-    /// # Arguments
-    ///
-    /// * `team_manager` - Optional team manager for team-based games
-    /// * `watchers` - Connection manager for all participants
-    /// * `schedule_message` - Function to schedule delayed messages for timing
-    /// * `tunnel_finder` - Function to find communication tunnels for participants
-    /// * `index` - Current slide index in the game
-    /// * `count` - Total number of slides in the game
-    ///
-    /// # Type Parameters
-    ///
-    /// * `T` - Type implementing the Tunnel trait for participant communication
-    /// * `F` - Function type for finding tunnels by participant ID
-    /// * `S` - Function type for scheduling alarm messages
+    /// Starts the multiple-choice slide by entering [`Phase::Question`].
     pub fn play<F: TunnelFinder, S: ScheduleMessageFn>(
         &mut self,
         team_manager: Option<&TeamManager<crate::names::NameStyle>>,
@@ -413,134 +504,15 @@ impl State {
         index: usize,
         count: usize,
     ) {
-        self.send_question_announcements(team_manager, watchers, schedule_message, tunnel_finder, index, count);
-    }
-
-    /// Sends the initial question announcement to all participants
-    ///
-    /// This method handles the transition from Unstarted to Question state,
-    /// announcing the question text and media without revealing answer options.
-    /// It schedules the transition to the answer phase or immediately proceeds
-    /// if no introduction time is configured.
-    ///
-    /// # Arguments
-    ///
-    /// * `team_manager` - Optional team manager for team-based games
-    /// * `watchers` - Connection manager for all participants
-    /// * `schedule_message` - Function to schedule delayed messages for timing
-    /// * `tunnel_finder` - Function to find communication tunnels for participants
-    /// * `index` - Current slide index in the game
-    /// * `count` - Total number of slides in the game
-    ///
-    /// # Type Parameters
-    ///
-    /// * `T` - Type implementing the Tunnel trait for participant communication
-    /// * `F` - Function type for finding tunnels by participant ID
-    /// * `S` - Function type for scheduling alarm messages
-    fn send_question_announcements<F: TunnelFinder, S: ScheduleMessageFn>(
-        &mut self,
-        team_manager: Option<&TeamManager<crate::names::NameStyle>>,
-        watchers: &Watchers,
-        schedule_message: S,
-        tunnel_finder: F,
-        index: usize,
-        count: usize,
-    ) {
-        if self.change_state(SlideState::Unstarted, SlideState::Question) {
-            watchers.announce(
-                &UpdateMessage::QuestionAnnouncement {
-                    index,
-                    count,
-                    question: &self.config.title,
-                    media: self.config.media.as_ref(),
-                    duration: self.config.introduce_question,
-                }
-                .into(),
-                &tunnel_finder,
-            );
-
-            if let Some(d) = self.config.introduce_question {
-                if d.is_zero() {
-                    self.send_answers_announcements(team_manager, watchers, schedule_message, tunnel_finder, index);
-                } else {
-                    schedule_message(
-                        AlarmMessage::ProceedFromSlideIntoSlide {
-                            index,
-                            to: SlideState::Answers,
-                        }
-                        .into(),
-                        d,
-                    );
-                }
-            }
-        }
-    }
-
-    /// Transitions to the answer selection phase and reveals answer options
-    ///
-    /// This method handles the transition from Question to Answers state,
-    /// revealing answer options to participants and starting the answer timer.
-    /// In team mode, answer options are distributed among team members to
-    /// encourage collaboration.
-    ///
-    /// # Arguments
-    ///
-    /// * `team_manager` - Optional team manager for team-based games
-    /// * `watchers` - Connection manager for all participants
-    /// * `schedule_message` - Function to schedule delayed messages for timing
-    /// * `tunnel_finder` - Function to find communication tunnels for participants
-    /// * `index` - Current slide index in the game
-    ///
-    /// # Type Parameters
-    ///
-    /// * `T` - Type implementing the Tunnel trait for participant communication
-    /// * `F` - Function type for finding tunnels by participant ID
-    /// * `S` - Function type for scheduling alarm messages
-    fn send_answers_announcements<F: TunnelFinder, S: ScheduleMessageFn>(
-        &mut self,
-        team_manager: Option<&TeamManager<crate::names::NameStyle>>,
-        watchers: &Watchers,
-        schedule_message: S,
-        tunnel_finder: F,
-        index: usize,
-    ) {
-        if self.change_state(SlideState::Question, SlideState::Answers) {
-            self.start_timer();
-            self.reserve_for_players(watchers.specific_count(ValueKind::Player));
-
-            watchers.announce_with(
-                |id, kind| match kind {
-                    ValueKind::Host | ValueKind::Player => Some(
-                        UpdateMessage::AnswersAnnouncement {
-                            duration: self.config.time_limit,
-                            answers: self.get_answers_for_player(
-                                id,
-                                kind,
-                                team_manager.map_or(1, |tm| tm.alive_team_size(id, &tunnel_finder)),
-                                team_manager.map_or(0, |tm| tm.alive_team_index(id, &tunnel_finder)),
-                                team_manager.is_some(),
-                            ),
-                            answer_mode: self.config.answer_mode,
-                        }
-                        .into(),
-                    ),
-                    ValueKind::Unassigned => None,
-                },
-                &tunnel_finder,
-            );
-
-            if let Some(time_limit) = self.config.time_limit {
-                schedule_message(
-                    AlarmMessage::ProceedFromSlideIntoSlide {
-                        index,
-                        to: SlideState::AnswersResults,
-                    }
-                    .into(),
-                    time_limit,
-                );
-            }
-            // None = host-paced: no timer, host must press Next
-        }
+        self.enter_phase(
+            Phase::Question,
+            team_manager,
+            watchers,
+            schedule_message,
+            tunnel_finder,
+            index,
+            count,
+        );
     }
 
     /// Determines which answer options should be visible to a specific participant
@@ -635,14 +607,14 @@ impl State {
         count: usize,
     ) -> SyncMessage<'_> {
         match self.state() {
-            SlideState::Unstarted | SlideState::Question => SyncMessage::QuestionAnnouncement {
+            Phase::Unstarted | Phase::Question => SyncMessage::QuestionAnnouncement {
                 index,
                 count,
                 question: &self.config.title,
                 media: self.config.media.as_ref(),
                 duration: self.config.introduce_question.map(|d| d.saturating_sub(self.elapsed())),
             },
-            SlideState::Answers => SyncMessage::AnswersAnnouncement {
+            Phase::Answers => SyncMessage::AnswersAnnouncement {
                 index,
                 count,
                 question: &self.config.title,
@@ -658,7 +630,7 @@ impl State {
                 answered_count: get_answered_count(self),
                 answer_mode: self.config.answer_mode,
             },
-            SlideState::AnswersResults => {
+            Phase::AnswersResults => {
                 let answer_count = self.per_index_answer_counts();
 
                 SyncMessage::AnswersResults {
@@ -714,18 +686,21 @@ impl State {
         tunnel_finder: F,
         message: &crate::AlarmMessage,
         index: usize,
+        count: usize,
     ) -> SlideAction<S> {
-        if let crate::AlarmMessage::MultipleChoice(AlarmMessage::ProceedFromSlideIntoSlide { index: _, to }) = message {
-            match to {
-                SlideState::Answers => {
-                    self.send_answers_announcements(team_manager, watchers, schedule_message, tunnel_finder, index);
-                }
-                SlideState::AnswersResults => self.send_answers_results(watchers, tunnel_finder),
-                _ => (),
-            }
+        if let crate::AlarmMessage::MultipleChoice(inner) = message {
+            self.default_receive_alarm(
+                inner.to,
+                team_manager,
+                watchers,
+                schedule_message,
+                tunnel_finder,
+                index,
+                count,
+            )
+        } else {
+            SlideAction::Stay
         }
-
-        SlideAction::Stay
     }
 }
 
@@ -740,21 +715,15 @@ impl QuestionReceiveMessage for State {
         index: usize,
         count: usize,
     ) -> SlideAction<S> {
-        match self.state() {
-            SlideState::Unstarted => {
-                self.send_question_announcements(team_manager, watchers, schedule_message, tunnel_finder, index, count);
-            }
-            SlideState::Question => {
-                self.send_answers_announcements(team_manager, watchers, schedule_message, tunnel_finder, index);
-            }
-            SlideState::Answers => self.send_answers_results(watchers, tunnel_finder),
-            SlideState::AnswersResults => {
-                add_scores_to_leaderboard(self, leaderboard, watchers, team_manager, tunnel_finder);
-                return SlideAction::Next { schedule_message };
-            }
-        }
-
-        SlideAction::Stay
+        self.default_receive_host_next(
+            leaderboard,
+            watchers,
+            team_manager,
+            schedule_message,
+            tunnel_finder,
+            index,
+            count,
+        )
     }
 
     fn receive_player_message<F: TunnelFinder>(

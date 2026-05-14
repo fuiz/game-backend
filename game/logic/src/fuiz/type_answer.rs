@@ -28,14 +28,37 @@ use crate::{
 use super::{
     super::game::IncomingPlayerMessage,
     common::{
-        AnswerHandler, HasSlideCore, QuestionReceiveMessage, SlideCore, SlideStateManager, SlideTimer,
-        add_scores_to_leaderboard,
+        AnswerHandler, HasSlideCore, PhasedSlide, ProceedFromSlideIntoSlide, QuestionReceiveMessage, SlideCore,
+        SlideStateManager, SlideTimer,
     },
     media::Media,
 };
 
-// Re-export SlideState publicly so other modules can use it
-pub use super::common::SlideState;
+/// Lifecycle phases for a type-answer slide.
+#[derive(Copy, Clone, Eq, PartialEq, Debug, Default, Serialize, Deserialize)]
+#[repr(u8)]
+pub enum Phase {
+    /// Initial state before the slide has started.
+    #[default]
+    Unstarted,
+    /// Displaying the question without accepting answers.
+    Question,
+    /// Accepting answers from players.
+    Answers,
+    /// Displaying results with correct answers and statistics.
+    AnswersResults,
+}
+
+impl super::common::Phase for Phase {
+    fn next(self) -> Option<Self> {
+        match self {
+            Self::Unstarted => Some(Self::Question),
+            Self::Question => Some(Self::Answers),
+            Self::Answers => Some(Self::AnswersResults),
+            Self::AnswersResults => None,
+        }
+    }
+}
 
 /// Configuration for a type answer slide
 ///
@@ -89,7 +112,7 @@ pub struct State {
     user_answers: FxHashMap<Id, (String, Timestamp)>,
     /// Shared runtime core: slide phase, answer-start timestamp, live-answered tally.
     #[cfg_attr(feature = "serializable", serde(flatten))]
-    core: SlideCore,
+    core: SlideCore<Phase>,
     /// The set of cleaned player answers
     cleaned_answers: HashSet<String>,
 }
@@ -149,17 +172,8 @@ pub enum UpdateMessage<'a> {
     },
 }
 
-/// Messages used for scheduled state transitions in type answer slides
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum AlarmMessage {
-    /// Triggers a transition from one slide state to another
-    ProceedFromSlideIntoSlide {
-        /// Index of the slide being transitioned
-        index: usize,
-        /// Target state to transition to
-        to: SlideState,
-    },
-}
+/// Scheduled phase-transition alarm for type-answer slides.
+pub type AlarmMessage = ProceedFromSlideIntoSlide<Phase>;
 
 /// Messages sent to the listeners who lack preexisting state to synchronize their state.
 ///
@@ -218,11 +232,13 @@ fn clean_answer(answer: &str, case_sensitive: bool) -> String {
 }
 
 impl HasSlideCore for State {
-    fn slide_core(&self) -> &SlideCore {
+    type Phase = Phase;
+
+    fn slide_core(&self) -> &SlideCore<Phase> {
         &self.core
     }
 
-    fn slide_core_mut(&mut self) -> &mut SlideCore {
+    fn slide_core_mut(&mut self) -> &mut SlideCore<Phase> {
         &mut self.core
     }
 }
@@ -257,7 +273,7 @@ impl AnswerHandler<String> for State {
     }
 
     fn send_answers_results<F: TunnelFinder>(&mut self, watchers: &Watchers, tunnel_finder: F) {
-        if self.change_state(SlideState::Answers, SlideState::AnswersResults) {
+        if self.change_state(Phase::Answers, Phase::AnswersResults) {
             watchers.announce(
                 &UpdateMessage::AnswersResults {
                     answers: self.cleaned_answers.iter().map(String::as_str).collect_vec(),
@@ -277,15 +293,105 @@ impl AnswerHandler<String> for State {
     }
 }
 
+impl PhasedSlide<String> for State {
+    fn enter_phase<F: TunnelFinder, S: ScheduleMessageFn>(
+        &mut self,
+        phase: Phase,
+        _team_manager: Option<&TeamManager<crate::names::NameStyle>>,
+        watchers: &Watchers,
+        schedule_message: S,
+        tunnel_finder: F,
+        index: usize,
+        count: usize,
+    ) {
+        match phase {
+            Phase::Unstarted => {}
+            Phase::Question => {
+                if !self.change_state(Phase::Unstarted, Phase::Question) {
+                    return;
+                }
+                if let Some(d) = self.config.introduce_question
+                    && d.is_zero()
+                {
+                    self.enter_phase(
+                        Phase::Answers,
+                        None,
+                        watchers,
+                        schedule_message,
+                        tunnel_finder,
+                        index,
+                        count,
+                    );
+                    return;
+                }
+
+                self.start_timer();
+
+                watchers.announce(
+                    &UpdateMessage::QuestionAnnouncement {
+                        index,
+                        count,
+                        question: &self.config.title,
+                        media: self.config.media.as_ref(),
+                        duration: self.config.introduce_question,
+                        accept_answers: false,
+                    }
+                    .into(),
+                    tunnel_finder,
+                );
+
+                if let Some(d) = self.config.introduce_question {
+                    schedule_message(
+                        AlarmMessage {
+                            index,
+                            to: Phase::Answers,
+                        }
+                        .into(),
+                        d,
+                    );
+                }
+                // None = host-paced: no timer, host must press Next.
+            }
+            Phase::Answers => {
+                if !self.change_state(Phase::Question, Phase::Answers) {
+                    return;
+                }
+                self.start_timer();
+                self.reserve_for_players(watchers.specific_count(ValueKind::Player));
+
+                watchers.announce(
+                    &UpdateMessage::QuestionAnnouncement {
+                        index,
+                        count,
+                        question: &self.config.title,
+                        media: self.config.media.as_ref(),
+                        duration: self.config.time_limit,
+                        accept_answers: true,
+                    }
+                    .into(),
+                    tunnel_finder,
+                );
+
+                if let Some(time_limit) = self.config.time_limit {
+                    schedule_message(
+                        AlarmMessage {
+                            index,
+                            to: Phase::AnswersResults,
+                        }
+                        .into(),
+                        time_limit,
+                    );
+                }
+            }
+            Phase::AnswersResults => {
+                self.send_answers_results(watchers, tunnel_finder);
+            }
+        }
+    }
+}
+
 impl State {
-    /// Starts the type answer slide by sending initial question announcements
-    ///
-    /// # Arguments
-    /// * `watchers` - Connection manager for players and hosts
-    /// * `schedule_message` - Function to schedule delayed messages
-    /// * `tunnel_finder` - Function to find communication tunnels for specific watchers
-    /// * `index` - Current slide index
-    /// * `count` - Total number of slides
+    /// Starts the type answer slide by entering the [`Phase::Question`] phase.
     pub fn play<F: TunnelFinder, S: ScheduleMessageFn>(
         &mut self,
         watchers: &Watchers,
@@ -294,126 +400,22 @@ impl State {
         index: usize,
         count: usize,
     ) {
-        self.send_question_announcements(watchers, schedule_message, tunnel_finder, index, count);
+        self.enter_phase(
+            Phase::Question,
+            None,
+            watchers,
+            schedule_message,
+            tunnel_finder,
+            index,
+            count,
+        );
     }
 
-    /// Sends the initial question announcement to all watchers
-    ///
-    /// This method handles the transition from Unstarted to Question state,
-    /// announcing the question text and media before accepting answers.
-    ///
-    /// # Arguments
-    /// * `watchers` - Connection manager for players and hosts
-    /// * `schedule_message` - Function to schedule delayed messages
-    /// * `tunnel_finder` - Function to find communication tunnels
-    /// * `index` - Current slide index
-    /// * `count` - Total number of slides
-    fn send_question_announcements<F: TunnelFinder, S: ScheduleMessageFn>(
-        &mut self,
-        watchers: &Watchers,
-        schedule_message: S,
-        tunnel_finder: F,
-        index: usize,
-        count: usize,
-    ) {
-        if self.change_state(SlideState::Unstarted, SlideState::Question) {
-            if let Some(d) = self.config.introduce_question
-                && d.is_zero()
-            {
-                self.send_accepting_answers(watchers, schedule_message, tunnel_finder, index, count);
-                return;
-            }
-
-            self.start_timer();
-
-            watchers.announce(
-                &UpdateMessage::QuestionAnnouncement {
-                    index,
-                    count,
-                    question: &self.config.title,
-                    media: self.config.media.as_ref(),
-                    duration: self.config.introduce_question,
-                    accept_answers: false,
-                }
-                .into(),
-                tunnel_finder,
-            );
-
-            if let Some(d) = self.config.introduce_question {
-                schedule_message(
-                    AlarmMessage::ProceedFromSlideIntoSlide {
-                        index,
-                        to: SlideState::Answers,
-                    }
-                    .into(),
-                    d,
-                );
-            }
-            // None = host-paced: no timer, host must press Next
-        }
-    }
-
-    /// Transitions to accepting answers from players
-    ///
-    /// This method handles the transition from Question to Answers state,
-    /// enabling the answer input field and starting the answer timer.
-    ///
-    /// # Arguments
-    /// * `watchers` - Connection manager for players and hosts
-    /// * `schedule_message` - Function to schedule delayed messages
-    /// * `tunnel_finder` - Function to find communication tunnels
-    /// * `index` - Current slide index
-    /// * `count` - Total number of slides
-    fn send_accepting_answers<F: TunnelFinder, S: ScheduleMessageFn>(
-        &mut self,
-        watchers: &Watchers,
-        schedule_message: S,
-        tunnel_finder: F,
-        index: usize,
-        count: usize,
-    ) {
-        if self.change_state(SlideState::Question, SlideState::Answers) {
-            self.start_timer();
-            self.reserve_for_players(watchers.specific_count(ValueKind::Player));
-
-            watchers.announce(
-                &UpdateMessage::QuestionAnnouncement {
-                    index,
-                    count,
-                    question: &self.config.title,
-                    media: self.config.media.as_ref(),
-                    duration: self.config.time_limit,
-                    accept_answers: true,
-                }
-                .into(),
-                tunnel_finder,
-            );
-
-            if let Some(time_limit) = self.config.time_limit {
-                schedule_message(
-                    AlarmMessage::ProceedFromSlideIntoSlide {
-                        index,
-                        to: SlideState::AnswersResults,
-                    }
-                    .into(),
-                    time_limit,
-                );
-            }
-            // None = host-paced: no timer, host must press Next
-        }
-    }
-
-    /// Generates a synchronization message for a newly connected watcher
-    ///
-    /// # Arguments
-    /// * `index` - Current slide index
-    /// * `count` - Total number of slides
-    ///
-    /// # Returns
-    /// * Appropriate sync message based on current slide state
+    /// Synchronization message for a newly connected watcher, derived from the
+    /// current phase.
     pub fn state_message(&self, index: usize, count: usize) -> SyncMessage<'_> {
         match self.state() {
-            SlideState::Unstarted | SlideState::Question => SyncMessage::QuestionAnnouncement {
+            Phase::Unstarted | Phase::Question => SyncMessage::QuestionAnnouncement {
                 index,
                 count,
                 question: &self.config.title,
@@ -421,7 +423,7 @@ impl State {
                 duration: self.config.introduce_question.map(|d| d.saturating_sub(self.elapsed())),
                 accept_answers: false,
             },
-            SlideState::Answers => SyncMessage::QuestionAnnouncement {
+            Phase::Answers => SyncMessage::QuestionAnnouncement {
                 index,
                 count,
                 question: &self.config.title,
@@ -429,7 +431,7 @@ impl State {
                 duration: self.config.time_limit.map(|d| d.saturating_sub(self.elapsed())),
                 accept_answers: true,
             },
-            SlideState::AnswersResults => SyncMessage::AnswersResults {
+            Phase::AnswersResults => SyncMessage::AnswersResults {
                 index,
                 count,
                 question: &self.config.title,
@@ -447,20 +449,7 @@ impl State {
         }
     }
 
-    /// Handles scheduled alarm messages for state transitions
-    ///
-    /// # Arguments
-    /// * `_leaderboard` - Mutable reference to the game leaderboard
-    /// * `watchers` - Connection manager
-    /// * `_team_manager` - Optional team manager for team-based games
-    /// * `schedule_message` - Function to schedule delayed messages
-    /// * `tunnel_finder` - Function to find communication tunnels
-    /// * `message` - The alarm message to handle
-    /// * `index` - Current slide index
-    /// * `count` - Total number of slides
-    ///
-    /// # Returns
-    /// * A `SlideAction` indicating whether to stay on the current slide or advance
+    /// Forwards a phase-transition alarm to [`PhasedSlide::default_receive_alarm`].
     pub(crate) fn receive_alarm<F: TunnelFinder, S: ScheduleMessageFn>(
         &mut self,
         watchers: &Watchers,
@@ -470,19 +459,11 @@ impl State {
         index: usize,
         count: usize,
     ) -> SlideAction<S> {
-        if let crate::AlarmMessage::TypeAnswer(AlarmMessage::ProceedFromSlideIntoSlide { index: _, to }) = message {
-            match to {
-                SlideState::Answers => {
-                    self.send_accepting_answers(watchers, schedule_message, tunnel_finder, index, count);
-                }
-                SlideState::AnswersResults => {
-                    self.send_answers_results(watchers, tunnel_finder);
-                }
-                _ => (),
-            }
+        if let crate::AlarmMessage::TypeAnswer(inner) = message {
+            self.default_receive_alarm(inner.to, None, watchers, schedule_message, tunnel_finder, index, count)
+        } else {
+            SlideAction::Stay
         }
-
-        SlideAction::Stay
     }
 }
 
@@ -497,23 +478,15 @@ impl QuestionReceiveMessage for State {
         index: usize,
         count: usize,
     ) -> SlideAction<S> {
-        match self.state() {
-            SlideState::Unstarted => {
-                self.send_question_announcements(watchers, schedule_message, tunnel_finder, index, count);
-            }
-            SlideState::Question => {
-                self.send_accepting_answers(watchers, schedule_message, tunnel_finder, index, count);
-            }
-            SlideState::Answers => {
-                self.send_answers_results(watchers, tunnel_finder);
-            }
-            SlideState::AnswersResults => {
-                add_scores_to_leaderboard(self, leaderboard, watchers, team_manager, tunnel_finder);
-                return SlideAction::Next { schedule_message };
-            }
-        }
-
-        SlideAction::Stay
+        self.default_receive_host_next(
+            leaderboard,
+            watchers,
+            team_manager,
+            schedule_message,
+            tunnel_finder,
+            index,
+            count,
+        )
     }
 
     fn receive_player_message<F: TunnelFinder>(
