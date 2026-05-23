@@ -140,6 +140,15 @@ impl<N: names::NamingScheme> TeamManager<N> {
     }
 
     fn create_preference_groups(&self, players: &[Id]) -> Vec<Vec<Id>> {
+        // Random mode has no preferences — every player is trivially their own group.
+        if self.assign_random {
+            let mut groups: Vec<Vec<Id>> = players.iter().map(|&id| vec![id]).collect();
+            if groups.is_empty() {
+                groups.push(Vec::new());
+            }
+            return groups;
+        }
+
         let mut preference_groups = players
             .iter()
             .map(|&id| {
