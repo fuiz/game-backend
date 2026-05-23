@@ -8,7 +8,6 @@ mod pets;
 mod romans;
 mod word_list;
 
-use heck::ToTitleCase;
 use iddqd::{BiHashItem, BiHashMap, bi_upcast};
 use rustc_hash::FxBuildHasher;
 use rustrict::CensorStr;
@@ -37,22 +36,6 @@ impl Default for NameStyle {
     }
 }
 
-impl NameStyle {
-    /// Generates a random name according to this style
-    ///
-    /// # Returns
-    ///
-    /// A randomly generated name as a String.
-    pub fn get_name(&self) -> String {
-        match self {
-            Self::Roman(count) => romans::roman_name(&romans::NameConfig { praenomen: *count > 2 }),
-            Self::Petname(count) => pets::pet_name(&pets::NameConfig { parts: *count as u8 }),
-        }
-        .join(" ")
-        .to_title_case()
-    }
-}
-
 /// Trait for generating names according to a specific naming scheme.
 ///
 /// Implementors of this trait provide a method to generate and return a name
@@ -66,14 +49,24 @@ pub trait NamingScheme {
     /// # Returns
     ///
     /// A pluralized version of the generated name as a String.
-    fn get_plural_name(&self) -> String {
-        pluralizer::pluralize(&self.get_name(), 3, false)
-    }
+    fn get_plural_name(&self) -> String;
 }
 
 impl NamingScheme for NameStyle {
     fn get_name(&self) -> String {
-        self.get_name()
+        match self {
+            Self::Roman(count) => romans::roman_name(&romans::NameConfig { praenomen: *count > 2 }),
+            Self::Petname(count) => pets::pet_name(&pets::NameConfig { parts: *count as u8 }),
+        }
+        .join(" ")
+    }
+
+    fn get_plural_name(&self) -> String {
+        match self {
+            Self::Roman(count) => romans::roman_name_plural(&romans::NameConfig { praenomen: *count > 2 }),
+            Self::Petname(count) => pets::pet_name_plural(&pets::NameConfig { parts: *count as u8 }),
+        }
+        .join(" ")
     }
 }
 

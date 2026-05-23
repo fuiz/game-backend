@@ -23,7 +23,7 @@ use super::{
     AlarmMessage, TruncatedVec,
     fuiz::{config::Fuiz, multiple_choice},
     leaderboard::{HostSummary, Leaderboard, ScoreMessage},
-    names::{self, Names},
+    names::{self, Names, NamingScheme},
     session::TunnelFinder,
     teams::{self, TeamManager},
     watcher::{self, Id, PlayerValue, ValueKind, Watchers},

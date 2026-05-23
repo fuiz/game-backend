@@ -5,6 +5,7 @@ use super::word_list::WordList;
 /// Word lists used to build pet-style names (e.g. "Happily Fluffy Cat").
 struct NameParts {
     nouns: WordList,
+    nouns_plural: WordList,
     adjectives: WordList,
     adverbs: WordList,
 }
@@ -18,6 +19,7 @@ pub struct NameConfig {
 
 static NAME_PARTS: LazyLock<NameParts> = LazyLock::new(|| NameParts {
     nouns: WordList::new(include_str!("../../names/pets/nouns.txt")),
+    nouns_plural: WordList::new(include_str!("../../names/pets/nouns_plural.txt")),
     adjectives: WordList::new(include_str!("../../names/pets/adjectives.txt")),
     adverbs: WordList::new(include_str!("../../names/pets/adverbs.txt")),
 });
@@ -26,12 +28,27 @@ static NAME_PARTS: LazyLock<NameParts> = LazyLock::new(|| NameParts {
 ///
 /// Returns the name as a vector of word parts, ordered from modifier to noun.
 pub fn pet_name(config: &NameConfig) -> Vec<&'static str> {
+    pet_name_inner(config, false)
+}
+
+/// Same as [`pet_name`] but draws the trailing noun from the pre-pluralized
+/// word list.
+pub fn pet_name_plural(config: &NameConfig) -> Vec<&'static str> {
+    pet_name_inner(config, true)
+}
+
+fn pet_name_inner(config: &NameConfig, plural_noun: bool) -> Vec<&'static str> {
     let name_parts = &*NAME_PARTS;
+    let nouns = if plural_noun {
+        &name_parts.nouns_plural
+    } else {
+        &name_parts.nouns
+    };
 
     (0..config.parts)
         .rev()
         .map(|i| match i {
-            0 => name_parts.nouns.random_choice(),
+            0 => nouns.random_choice(),
             1 => name_parts.adjectives.random_choice(),
             _ => name_parts.adverbs.random_choice(),
         })

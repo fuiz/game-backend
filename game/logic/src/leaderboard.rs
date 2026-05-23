@@ -439,7 +439,7 @@ mod tests {
         // Positions should be consecutive (0 and 1)
         let pos1 = leaderboard.score(id1).unwrap().position;
         let pos2 = leaderboard.score(id2).unwrap().position;
-        assert!(pos1 != pos2);
+        assert_ne!(pos1, pos2);
         assert!(pos1 <= 1 && pos2 <= 1);
     }
 

@@ -59,8 +59,6 @@ thiserror = "2.0"                                   # Error handling and custom 
 rustrict = { version = "0.7", default-features = false, features = [
     "censor",
 ] } # Content filtering and profanity detection
-heck = "0.5" # String case conversion
-pluralizer = "0.5" # String pluralization utilities
 
 [lints]
 workspace = true
