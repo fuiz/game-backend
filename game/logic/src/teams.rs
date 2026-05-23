@@ -4,9 +4,10 @@
 //! Fuiz games. It supports both random team assignment and preference-based
 //! team formation where players can choose their preferred teammates.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 
 use itertools::Itertools;
+use rustc_hash::FxHashMap;
 #[cfg(feature = "serializable")]
 use serde::{Deserialize, Serialize};
 
@@ -28,7 +29,7 @@ use super::{
 #[cfg_attr(feature = "serializable", derive(Serialize, Deserialize))]
 pub struct TeamManager<N: names::NamingScheme> {
     /// Mapping from player ID to their team ID
-    player_to_team: HashMap<Id, Id>,
+    player_to_team: FxHashMap<Id, Id>,
     /// Ideal size for each team
     pub optimal_size: usize,
     /// Whether to use random assignment or preference-based assignment
@@ -37,7 +38,7 @@ pub struct TeamManager<N: names::NamingScheme> {
     name_style: N,
 
     /// Player preferences for teammates (only used in non-random mode)
-    preferences: Option<HashMap<Id, Vec<Id>>>,
+    preferences: Option<FxHashMap<Id, Vec<Id>>>,
 
     /// Finalized list of teams with their IDs and names (computed once)
     teams: Option<Vec<(Id, String)>>,
@@ -45,7 +46,7 @@ pub struct TeamManager<N: names::NamingScheme> {
     next_team_to_receive_player: usize,
 
     /// Mapping from team ID to list of player IDs in that team
-    team_to_players: HashMap<Id, Vec<Id>>,
+    team_to_players: FxHashMap<Id, Vec<Id>>,
 }
 
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
@@ -71,12 +72,16 @@ impl<N: names::NamingScheme> TeamManager<N> {
     /// A new `TeamManager` instance ready for team formation
     pub fn new(optimal_size: usize, assign_random: bool, name_style: N) -> Self {
         Self {
-            player_to_team: HashMap::default(),
-            team_to_players: HashMap::default(),
+            player_to_team: FxHashMap::default(),
+            team_to_players: FxHashMap::default(),
             assign_random,
             name_style,
             optimal_size,
-            preferences: if assign_random { None } else { Some(HashMap::default()) },
+            preferences: if assign_random {
+                None
+            } else {
+                Some(FxHashMap::default())
+            },
             teams: None,
             next_team_to_receive_player: 0,
         }
