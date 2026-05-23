@@ -25,7 +25,7 @@ serde_json = "1.0"
 thiserror = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
 garde-actix-web = "0.12"
-garde = "0.22"
+garde = "0.23"
 parking_lot = "0.12"
 bytes = "1.5"
 

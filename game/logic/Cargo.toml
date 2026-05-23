@@ -52,7 +52,7 @@ once_cell_serde = { version = "1.20", features = [
 ] } # Lazy static values with serde
 
 # Validation and safety
-garde = { version = "0.22", features = ["derive"] } # Input validation framework
+garde = { version = "0.23", features = ["derive"] } # Input validation framework
 thiserror = "2.0"                                   # Error handling and custom error types
 
 # Name manipulation utilities

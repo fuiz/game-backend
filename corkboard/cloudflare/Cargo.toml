@@ -11,8 +11,8 @@ workspace = true
 crate-type = ["cdylib"]
 
 [dependencies]
-worker = { version = "0.7", features = ['http'] }
-worker-macros = { version = "0.7", features = ['http'] }
+worker = { version = "0.8", features = ['http'] }
+worker-macros = { version = "0.8", features = ['http'] }
 http = "1.4"
 corkboard = { path = "../logic" }
 image = { version = "0.25", default-features = false, features = [

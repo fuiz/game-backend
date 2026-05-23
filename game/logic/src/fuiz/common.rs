@@ -764,9 +764,9 @@ mod tests {
 
     #[test]
     fn score_is_full_in_host_paced_mode() {
-        assert_eq!(calculate_slide_score(None, Duration::from_secs(0), 1000), 1000);
+        assert_eq!(calculate_slide_score(None, Duration::ZERO, 1000), 1000);
         assert_eq!(
-            calculate_slide_score(None, Duration::from_secs(60), 1000),
+            calculate_slide_score(None, Duration::from_mins(1), 1000),
             1000,
             "host-paced mode ignores how long the player took"
         );
@@ -775,7 +775,7 @@ mod tests {
     #[test]
     fn instant_answer_earns_full_points() {
         let limit = Some(Duration::from_secs(10));
-        assert_eq!(calculate_slide_score(limit, Duration::from_secs(0), 1000), 1000);
+        assert_eq!(calculate_slide_score(limit, Duration::ZERO, 1000), 1000);
     }
 
     #[test]
