@@ -5,7 +5,7 @@
 //! scoring, team formation, and real-time communication with all
 //! connected participants.
 
-use std::{collections::HashSet, fmt::Debug};
+use std::fmt::Debug;
 
 use garde::Validate;
 use itertools::Itertools;
@@ -199,8 +199,13 @@ pub enum IncomingPlayerMessage {
     StringAnswer(String),
     /// Array of strings submitted (for order questions)
     StringArrayAnswer(Vec<String>),
-    /// Team preference selection (during team formation)
-    ChooseTeammates(Vec<String>),
+    /// Substring search for a teammate. Sent while the player is on the
+    /// preference-mode picker; the server resolves matches and responds with
+    /// either [`UpdateMessage::TeammateSelected`] or
+    /// [`UpdateMessage::TeammateSuggestions`].
+    SearchTeammate(String),
+    /// Remove an exact name from the player's selected-teammates list.
+    DeselectTeammate(String),
 }
 
 /// Messages that can be sent by unassigned connections
@@ -265,12 +270,23 @@ pub enum UpdateMessage<'a> {
     Summary(SummaryMessage<'a>),
     /// Inform player to find a team (team games only)
     FindTeam(&'a str),
-    /// Prompt for teammate selection during team formation
-    ChooseTeammates {
-        /// Maximum number of teammates that can be selected
-        max_selection: usize,
-        /// Available players with their current selection status: (name, is_selected)
-        available: Vec<(&'a str, bool)>,
+    /// Confirm a teammate was added to the player's selection (response to
+    /// [`IncomingPlayerMessage::SearchTeammate`] when exactly one match found).
+    TeammateSelected {
+        /// The matched player's full name.
+        name: &'a str,
+    },
+    /// Disambiguation list of up to five names matching the query (response to
+    /// [`IncomingPlayerMessage::SearchTeammate`] when 0 or 2+ matches).
+    TeammateSuggestions {
+        /// Up to five candidate names, alphabetically sorted.
+        suggestions: Vec<&'a str>,
+    },
+    /// Confirm a teammate was removed (response to
+    /// [`IncomingPlayerMessage::DeselectTeammate`]).
+    TeammateDeselected {
+        /// The removed name.
+        name: &'a str,
     },
 }
 
@@ -313,12 +329,12 @@ pub enum SyncMessage<'a> {
     NotAllowed,
     /// Sync team finding information
     FindTeam(&'a str),
-    /// Sync teammate selection options
-    ChooseTeammates {
-        /// Maximum number of teammates that can be selected
+    /// Sync the preference-mode teammate picker.
+    TeammatePicker {
+        /// Maximum number of teammates this player may select.
         max_selection: usize,
-        /// Available players with their current selection status: (name, is_selected)
-        available: Vec<(&'a str, bool)>,
+        /// Names this player has already selected.
+        selected: Vec<&'a str>,
     },
 }
 
@@ -432,41 +448,6 @@ impl Game {
         }
     }
 
-    /// Creates a teammate selection message for team formation
-    ///
-    /// This generates the message shown to players during team formation,
-    /// allowing them to select their preferred teammates from available players.
-    ///
-    /// # Arguments
-    ///
-    /// * `watcher` - The ID of the player who needs to choose teammates
-    /// * `team_manager` - The team manager containing preference data
-    /// * `tunnel_finder` - Function to find active communication tunnels
-    ///
-    /// # Returns
-    ///
-    /// An `UpdateMessage` with teammate selection options
-    fn choose_teammates_message<F: TunnelFinder>(
-        &self,
-        watcher: Id,
-        team_manager: &TeamManager<names::NameStyle>,
-        tunnel_finder: F,
-    ) -> UpdateMessage<'_> {
-        let pref: HashSet<_> = team_manager
-            .get_preferences(watcher)
-            .unwrap_or_default()
-            .into_iter()
-            .collect();
-        UpdateMessage::ChooseTeammates {
-            max_selection: team_manager.optimal_size,
-            available: self
-                .watchers
-                .specific_iter(ValueKind::Player, tunnel_finder)
-                .filter_map(|(id, _, _)| Some((self.names.get_name(&id)?, pref.contains(&id))))
-                .collect(),
-        }
-    }
-
     /// `TruncatedVec` shape used for [`SyncMessage::WaitingScreen`].
     ///
     /// `items` is the full player-name list when `include_names` is true (host
@@ -541,10 +522,15 @@ impl Game {
     /// let game = Game::new(fuiz_config, options, host_id, &Settings::default());
     /// ```
     pub fn new(fuiz: Fuiz, options: Options, host_id: Id, settings: &crate::settings::Settings) -> Self {
+        let needs_prefix_index = options.teams.is_some_and(|t| !t.assign_random);
         Self {
             fuiz_config: fuiz,
             watchers: Watchers::with_host_id(host_id, settings.fuiz.max_player_count),
-            names: Names::default(),
+            names: if needs_prefix_index {
+                Names::with_prefix_index()
+            } else {
+                Names::default()
+            },
             leaderboard: Leaderboard::default(),
             state: State::WaitingScreen,
             options,
@@ -900,20 +886,6 @@ impl Game {
         if !name.is_empty() {
             // Announce to others of user joining
             if matches!(self.state, State::WaitingScreen) {
-                if let Some(team_manager) = &self.team_manager
-                    && !team_manager.is_random_assignments()
-                {
-                    self.watchers.announce_with(
-                        |id, value| match value {
-                            ValueKind::Player => {
-                                Some(self.choose_teammates_message(id, team_manager, &tunnel_finder).into())
-                            }
-                            _ => None,
-                        },
-                        &tunnel_finder,
-                    );
-                }
-
                 self.watchers.announce_specific(
                     ValueKind::Host,
                     &UpdateMessage::PlayerJoined(name).into(),
@@ -926,6 +898,75 @@ impl Game {
             &self.state_message(watcher, ValueKind::Player, &tunnel_finder),
             watcher,
             tunnel_finder,
+        );
+    }
+
+    /// Resolves a `SearchTeammate` query for `watcher_id`. Sends back either
+    /// [`UpdateMessage::TeammateSelected`] (exact name match, or unique
+    /// substring match) or [`UpdateMessage::TeammateSuggestions`] (0 or 2+
+    /// substring matches). Self-picks and over-cap selections are dropped.
+    fn handle_search_teammate<F: TunnelFinder>(&mut self, watcher_id: Id, query: &str, tunnel_finder: F) {
+        let Some(team_manager) = self.team_manager.as_ref() else {
+            return;
+        };
+        if team_manager.is_random_assignments() || !matches!(self.state, State::WaitingScreen) {
+            return;
+        }
+        let max_selection = team_manager.optimal_size.saturating_sub(1);
+
+        let exact = self.names.get_id(query).filter(|id| *id != watcher_id);
+        let (teammate_id, name) = if let Some(id) = exact {
+            (id, query.to_owned())
+        } else {
+            let matches = self.names.prefix_search(query, watcher_id, 5);
+            if matches.len() == 1 {
+                let name = matches[0].to_owned();
+                let Some(id) = self.names.get_id(&name) else {
+                    return;
+                };
+                (id, name)
+            } else {
+                Watchers::send_message(
+                    &UpdateMessage::TeammateSuggestions { suggestions: matches }.into(),
+                    watcher_id,
+                    &tunnel_finder,
+                );
+                return;
+            }
+        };
+
+        let already_selected = team_manager.has_preference(watcher_id, teammate_id);
+        if !already_selected && team_manager.preference_count(watcher_id) >= max_selection {
+            return;
+        }
+        if !already_selected && let Some(team_manager) = self.team_manager.as_mut() {
+            team_manager.add_preference(watcher_id, teammate_id);
+        }
+        Watchers::send_message(
+            &UpdateMessage::TeammateSelected { name: &name }.into(),
+            watcher_id,
+            &tunnel_finder,
+        );
+    }
+
+    /// Removes `name` from `watcher_id`'s preference list (if present) and
+    /// confirms back to the caller. Idempotent.
+    fn handle_deselect_teammate<F: TunnelFinder>(&mut self, watcher_id: Id, name: &str, tunnel_finder: F) {
+        let Some(team_manager) = self.team_manager.as_ref() else {
+            return;
+        };
+        if team_manager.is_random_assignments() || !matches!(self.state, State::WaitingScreen) {
+            return;
+        }
+        if let Some(teammate_id) = self.names.get_id(name)
+            && let Some(team_manager) = self.team_manager.as_mut()
+        {
+            team_manager.remove_preference(watcher_id, teammate_id);
+        }
+        Watchers::send_message(
+            &UpdateMessage::TeammateDeselected { name }.into(),
+            watcher_id,
+            &tunnel_finder,
         );
     }
 
@@ -1010,16 +1051,11 @@ impl Game {
                     Watchers::send_message(&UpdateMessage::NameError(e).into(), watcher_id, tunnel_finder);
                 }
             }
-            IncomingMessage::Player(IncomingPlayerMessage::ChooseTeammates(preferences)) => {
-                if let Some(team_manager) = &mut self.team_manager {
-                    team_manager.set_preferences(
-                        watcher_id,
-                        preferences
-                            .into_iter()
-                            .filter_map(|name| self.names.get_id(&name))
-                            .collect_vec(),
-                    );
-                }
+            IncomingMessage::Player(IncomingPlayerMessage::SearchTeammate(query)) => {
+                self.handle_search_teammate(watcher_id, &query, &tunnel_finder);
+            }
+            IncomingMessage::Player(IncomingPlayerMessage::DeselectTeammate(name)) => {
+                self.handle_deselect_teammate(watcher_id, &name, &tunnel_finder);
             }
             message => match &mut self.state {
                 State::WaitingScreen | State::TeamDisplay => {
@@ -1161,18 +1197,15 @@ impl Game {
                 Some(team_manager)
                     if !team_manager.is_random_assignments() && matches!(watcher_kind, ValueKind::Player) =>
                 {
-                    let pref: HashSet<Id> = team_manager
+                    let selected: Vec<&str> = team_manager
                         .get_preferences(watcher_id)
                         .unwrap_or_default()
-                        .into_iter()
+                        .iter()
+                        .filter_map(|id| self.names.get_name(id))
                         .collect();
-                    SyncMessage::ChooseTeammates {
-                        max_selection: team_manager.optimal_size,
-                        available: self
-                            .watchers
-                            .specific_iter(ValueKind::Player, tunnel_finder)
-                            .filter_map(|(id, _, _)| Some((self.names.get_name(&id)?, pref.contains(&id))))
-                            .collect(),
+                    SyncMessage::TeammatePicker {
+                        max_selection: team_manager.optimal_size.saturating_sub(1),
+                        selected,
                     }
                     .into()
                 }
@@ -2021,8 +2054,8 @@ mod tests {
         assert!(game.assign_player_name(player1, "Player1", tunnel_finder).is_ok());
         assert!(game.assign_player_name(player2, "Player2", tunnel_finder).is_ok());
 
-        // Send teammate selection message
-        let teammate_msg = IncomingMessage::Player(IncomingPlayerMessage::ChooseTeammates(vec!["Player2".to_string()]));
+        // Send teammate selection message via search
+        let teammate_msg = IncomingMessage::Player(IncomingPlayerMessage::SearchTeammate("Player2".to_string()));
         let schedule_message = |_: crate::AlarmMessage, _: std::time::Duration| {};
 
         game.receive_message(player1, teammate_msg, schedule_message, tunnel_finder);
@@ -2765,7 +2798,7 @@ mod tests {
         let state_msg = game.state_message(player1, crate::watcher::ValueKind::Player, tunnel_finder);
         assert!(matches!(
             state_msg,
-            crate::SyncMessage::Game(SyncMessage::ChooseTeammates { .. })
+            crate::SyncMessage::Game(SyncMessage::TeammatePicker { .. })
         ));
     }
 
@@ -2925,7 +2958,7 @@ mod tests {
     }
 
     #[test]
-    fn test_game_choose_teammates_message() {
+    fn test_search_teammate_exact_match_selects() {
         let fuiz = create_test_fuiz();
         let team_options = TeamOptions {
             size: 3,
@@ -2948,17 +2981,22 @@ mod tests {
                 None
             }
         };
+        let schedule_message = |_: crate::AlarmMessage, _: std::time::Duration| {};
 
-        // Add players
         assert!(game.add_unassigned(player1, tunnel_finder).is_ok());
         assert!(game.add_unassigned(player2, tunnel_finder).is_ok());
         assert!(game.assign_player_name(player1, "Player1", tunnel_finder).is_ok());
         assert!(game.assign_player_name(player2, "Player2", tunnel_finder).is_ok());
 
-        if let Some(team_manager) = &game.team_manager {
-            let message = game.choose_teammates_message(player1, team_manager, tunnel_finder);
-            assert!(matches!(message, UpdateMessage::ChooseTeammates { .. }));
-        }
+        game.receive_message(
+            player1,
+            IncomingMessage::Player(IncomingPlayerMessage::SearchTeammate("Player2".to_string())),
+            schedule_message,
+            tunnel_finder,
+        );
+
+        let team_manager = game.team_manager.as_ref().expect("team manager configured");
+        assert!(team_manager.has_preference(player1, player2));
     }
 
     #[test]

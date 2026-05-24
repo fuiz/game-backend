@@ -379,6 +379,42 @@ impl<N: names::NamingScheme> TeamManager<N> {
         }
     }
 
+    /// Appends `teammate_id` to `player_id`'s preference list if absent.
+    /// No-op in random mode or when the entry is already present.
+    pub fn add_preference(&mut self, player_id: Id, teammate_id: Id) {
+        if let Some(prefs) = &mut self.preferences {
+            let entry = prefs.entry(player_id).or_default();
+            if !entry.contains(&teammate_id) {
+                entry.push(teammate_id);
+            }
+        }
+    }
+
+    /// Removes `teammate_id` from `player_id`'s preference list.
+    pub fn remove_preference(&mut self, player_id: Id, teammate_id: Id) {
+        if let Some(prefs) = &mut self.preferences
+            && let Some(entry) = prefs.get_mut(&player_id)
+        {
+            entry.retain(|&id| id != teammate_id);
+        }
+    }
+
+    /// Whether `player_id` has `teammate_id` in their preference list.
+    pub fn has_preference(&self, player_id: Id, teammate_id: Id) -> bool {
+        self.preferences
+            .as_ref()
+            .and_then(|p| p.get(&player_id))
+            .is_some_and(|v| v.contains(&teammate_id))
+    }
+
+    /// Number of teammates `player_id` currently has selected.
+    pub fn preference_count(&self, player_id: Id) -> usize {
+        self.preferences
+            .as_ref()
+            .and_then(|p| p.get(&player_id))
+            .map_or(0, Vec::len)
+    }
+
     /// Adds a new player to an existing team
     ///
     /// Assigns a player to a team after the initial team formation has been

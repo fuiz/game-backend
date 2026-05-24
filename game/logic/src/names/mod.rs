@@ -8,6 +8,8 @@ mod pets;
 mod romans;
 mod word_list;
 
+use std::collections::BTreeMap;
+
 use iddqd::{BiHashItem, BiHashMap, bi_upcast};
 use rustc_hash::FxBuildHasher;
 use rustrict::CensorStr;
@@ -99,11 +101,15 @@ impl BiHashItem for NameEntry {
 ///
 /// One [`NameEntry`] per name, indexed both by `id` and by `name` via
 /// `iddqd::BiHashMap`. FxHash on the projected keys since `Id` is uniformly
-/// random and names are short.
+/// random and names are short. When `prefix_index` is `Some`, a secondary
+/// `BTreeMap` keyed by the lowercased name powers O(log N + matches)
+/// prefix lookups; otherwise `prefix_search` returns no results and
+/// `set_name` skips the maintenance cost.
 #[derive(Debug, Default, Clone)]
 #[cfg_attr(feature = "serializable", derive(Serialize, Deserialize))]
 pub struct Names {
     map: BiHashMap<NameEntry, FxBuildHasher>,
+    prefix_index: Option<BTreeMap<String, Id>>,
 }
 
 /// Errors that can occur during name validation and assignment
@@ -127,6 +133,17 @@ pub enum Error {
 }
 
 impl Names {
+    /// Constructs a `Names` that maintains a sorted prefix index for
+    /// [`Self::prefix_search`]. Use when the game runs preference-mode teams;
+    /// otherwise prefer [`Names::default`] to skip the per-insert maintenance
+    /// cost (`prefix_search` will return no results in that case).
+    pub fn with_prefix_index() -> Self {
+        Self {
+            map: BiHashMap::default(),
+            prefix_index: Some(BTreeMap::new()),
+        }
+    }
+
     /// Retrieves the name associated with a player ID
     ///
     /// # Arguments
@@ -194,7 +211,12 @@ impl Names {
             id,
             name: name.to_owned(),
         }) {
-            Ok(()) => Ok(name),
+            Ok(()) => {
+                if let Some(index) = &mut self.prefix_index {
+                    index.insert(name.to_ascii_lowercase(), id);
+                }
+                Ok(name)
+            }
             Err(dup) => {
                 if dup.duplicates().iter().any(|duplicate| duplicate.id == id) {
                     Err(Error::Assigned)
@@ -216,6 +238,39 @@ impl Names {
     /// The player ID if the name is assigned, otherwise `None`
     pub fn get_id(&self, name: &str) -> Option<Id> {
         self.map.get2(name).map(|e| e.id)
+    }
+
+    /// ASCII-case-insensitive prefix search backed by a sorted index. Returns
+    /// up to `max_results` matches in alphabetical order, with `self_id`
+    /// excluded. If any match equals `query` case-insensitively, that match
+    /// is returned alone (exact-match disambiguation).
+    pub fn prefix_search(&self, query: &str, self_id: Id, max_results: usize) -> Vec<&str> {
+        let Some(index) = &self.prefix_index else {
+            return Vec::new();
+        };
+        let query_lower = query.to_ascii_lowercase();
+        let mut matches: Vec<&str> = Vec::with_capacity(max_results);
+
+        for (lower_name, &id) in index.range(query_lower.clone()..) {
+            if !lower_name.starts_with(&query_lower) {
+                break;
+            }
+            if id == self_id {
+                continue;
+            }
+            if let Some(entry) = self.map.get1(&id) {
+                matches.push(entry.name.as_str());
+                if matches.len() >= max_results {
+                    break;
+                }
+            }
+        }
+
+        if let Some(exact) = matches.iter().copied().find(|name| name.eq_ignore_ascii_case(query)) {
+            return vec![exact];
+        }
+
+        matches
     }
 }
 
