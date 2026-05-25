@@ -240,6 +240,16 @@ impl Names {
         self.map.get2(name).map(|e| e.id)
     }
 
+    /// Removes the name associated with `id`, freeing it so another player
+    /// can take it. Returns the previous name if one was assigned.
+    pub fn remove_name(&mut self, id: &Id) -> Option<String> {
+        let entry = self.map.remove1(id)?;
+        if let Some(index) = &mut self.prefix_index {
+            index.remove(&entry.name.to_ascii_lowercase());
+        }
+        Some(entry.name)
+    }
+
     /// ASCII-case-insensitive prefix search backed by a sorted index. Returns
     /// up to `max_results` matches in alphabetical order, with `self_id`
     /// excluded. If any match equals `query` case-insensitively, that match

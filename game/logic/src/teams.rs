@@ -399,6 +399,23 @@ impl<N: names::NamingScheme> TeamManager<N> {
         }
     }
 
+    /// Drops every trace of a player: their outgoing preferences, any mentions
+    /// of them in other players' preference lists, and (post-finalize) their
+    /// team assignment.
+    pub fn remove_player(&mut self, player_id: Id) {
+        if let Some(prefs) = &mut self.preferences {
+            prefs.remove(&player_id);
+            for entry in prefs.values_mut() {
+                entry.retain(|&id| id != player_id);
+            }
+        }
+        if let Some(team_id) = self.player_to_team.remove(&player_id)
+            && let Some(roster) = self.team_to_players.get_mut(&team_id)
+        {
+            roster.retain(|&id| id != player_id);
+        }
+    }
+
     /// Whether `player_id` has `teammate_id` in their preference list.
     pub fn has_preference(&self, player_id: Id, teammate_id: Id) -> bool {
         self.preferences

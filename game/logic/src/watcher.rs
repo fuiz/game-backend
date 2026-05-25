@@ -355,6 +355,15 @@ impl Watchers {
         }
     }
 
+    /// Fully removes a watcher from both `mapping` and `reverse_mapping`,
+    /// so the id can no longer be reclaimed via reconnection. Returns the
+    /// removed value, or `None` if the watcher did not exist.
+    pub fn remove_watcher(&mut self, watcher_id: Id) -> Option<Value> {
+        let value = self.mapping.remove(&watcher_id)?;
+        self.reverse_mapping[value.kind()].remove(&watcher_id);
+        Some(value)
+    }
+
     /// Marks a watcher as live again (e.g. they reconnected). Idempotent.
     pub fn watcher_returned(&mut self, watcher_id: Id) {
         if let Some(v) = self.mapping.get(&watcher_id) {

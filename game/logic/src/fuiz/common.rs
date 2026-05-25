@@ -610,7 +610,9 @@ pub(crate) trait QuestionReceiveMessage {
                 SlideAction::Stay
             }
             crate::game::IncomingMessage::Host(
-                crate::game::IncomingHostMessage::Index(_) | crate::game::IncomingHostMessage::Lock(_),
+                crate::game::IncomingHostMessage::Index(_)
+                | crate::game::IncomingHostMessage::Lock(_)
+                | crate::game::IncomingHostMessage::Kick(_),
             )
             | crate::game::IncomingMessage::Ghost(_)
             | crate::game::IncomingMessage::Unassigned(_) => SlideAction::Stay,

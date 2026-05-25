@@ -225,7 +225,7 @@ pub enum IncomingGhostMessage {
 }
 
 /// Messages that can be sent by the game host
-#[derive(Debug, Deserialize, Clone, Copy)]
+#[derive(Debug, Deserialize, Clone)]
 pub enum IncomingHostMessage {
     /// Advance to the next slide/question
     Next,
@@ -233,6 +233,8 @@ pub enum IncomingHostMessage {
     Index(usize),
     /// Lock or unlock the game to new participants
     Lock(bool),
+    /// Remove a player by their assigned name and prevent them from reconnecting
+    Kick(String),
 }
 
 /// Update messages sent to participants about game state changes
@@ -248,6 +250,8 @@ pub enum UpdateMessage<'a> {
     PlayerJoined(&'a str),
     /// A player left the waiting screen — host-only incremental event.
     PlayerLeft(&'a str),
+    /// Sent to a participant just before they are forcibly removed by the host
+    Kicked,
     /// Update the team display screen
     TeamDisplay(TruncatedVec<&'a str>),
     /// Prompt the participant to choose a name
@@ -1044,6 +1048,11 @@ impl Game {
             IncomingMessage::Host(IncomingHostMessage::Lock(lock_state)) => {
                 self.locked = lock_state;
             }
+            IncomingMessage::Host(IncomingHostMessage::Kick(target_name)) => {
+                if let Some(target_id) = self.names.get_id(&target_name) {
+                    self.kick_watcher(target_id, &tunnel_finder);
+                }
+            }
             IncomingMessage::Unassigned(IncomingUnassignedMessage::NameRequest(s))
                 if self.options.random_names.is_none() =>
             {
@@ -1289,6 +1298,43 @@ impl Game {
                 ValueKind::Unassigned => SyncMessage::NotAllowed.into(),
             },
         }
+    }
+
+    /// Forcibly remove a participant from the game.
+    ///
+    /// Unlike [`Self::watcher_left`], the participant cannot reconnect: their
+    /// id is dropped from the watcher mapping and their name is freed. A
+    /// [`UpdateMessage::Kicked`] is delivered before the tunnel is closed so
+    /// the client can react. The host cannot be kicked.
+    pub fn kick_watcher<F: TunnelFinder>(&mut self, watcher_id: Id, tunnel_finder: F) {
+        let kind = match self.watchers.get_watcher_value_ref(watcher_id).map(Value::kind) {
+            Some(ValueKind::Host) | None => return,
+            Some(kind) => kind,
+        };
+
+        if matches!(kind, ValueKind::Player) {
+            if let State::Slide(current_slide) = &mut self.state {
+                current_slide.state.mark_watcher_left(watcher_id);
+            }
+            if matches!(self.state, State::WaitingScreen)
+                && let Some(name) = self.names.get_name(&watcher_id)
+            {
+                self.watchers.announce_specific(
+                    ValueKind::Host,
+                    &UpdateMessage::PlayerLeft(name).into(),
+                    &tunnel_finder,
+                );
+            }
+        }
+
+        Watchers::send_message(&UpdateMessage::Kicked.into(), watcher_id, &tunnel_finder);
+        Watchers::remove_watcher_session(watcher_id, &tunnel_finder);
+
+        if let Some(team_manager) = &mut self.team_manager {
+            team_manager.remove_player(watcher_id);
+        }
+        self.names.remove_name(&watcher_id);
+        self.watchers.remove_watcher(watcher_id);
     }
 
     /// Notify the game that a watcher's underlying session is gone.
@@ -1946,6 +1992,100 @@ mod tests {
 
         // State should not change since message doesn't follow sender type
         assert!(matches!(game.state, State::WaitingScreen));
+    }
+
+    #[test]
+    fn test_game_kick_player_from_waiting_screen() {
+        let fuiz = create_test_fuiz();
+        let options = Options::default();
+        let host_id = crate::watcher::Id::new();
+        let mut game = Game::new(fuiz, options, host_id, &test_settings());
+
+        let host_tunnel = MockTunnel::new();
+        let player_id = crate::watcher::Id::new();
+        let player_tunnel = MockTunnel::new();
+        let tunnel_finder = |id: crate::watcher::Id| {
+            if id == host_id {
+                Some(host_tunnel.clone())
+            } else if id == player_id {
+                Some(player_tunnel.clone())
+            } else {
+                None
+            }
+        };
+
+        assert!(game.add_unassigned(player_id, tunnel_finder).is_ok());
+        assert!(game.assign_player_name(player_id, "Victim", tunnel_finder).is_ok());
+
+        let schedule_message = |_: crate::AlarmMessage, _: std::time::Duration| {};
+        game.receive_message(
+            host_id,
+            IncomingMessage::Host(IncomingHostMessage::Kick("Victim".to_owned())),
+            schedule_message,
+            tunnel_finder,
+        );
+
+        // Watcher fully removed — reconnect attempts hit `has_watcher` and miss.
+        assert!(!game.watchers.has_watcher(player_id));
+        // Name freed so someone else can claim it.
+        let new_id = crate::watcher::Id::new();
+        assert!(game.add_unassigned(new_id, tunnel_finder).is_ok());
+        assert!(game.assign_player_name(new_id, "Victim", tunnel_finder).is_ok());
+
+        let player_msgs = player_tunnel.messages.lock().unwrap();
+        assert!(player_msgs.iter().any(|m| m.contains("Kicked")));
+        let host_msgs = host_tunnel.messages.lock().unwrap();
+        assert!(host_msgs.iter().any(|m| m.contains("PlayerLeft")));
+    }
+
+    #[test]
+    fn test_game_kick_host_is_noop() {
+        let fuiz = create_test_fuiz();
+        let options = Options::default();
+        let host_id = crate::watcher::Id::new();
+        let mut game = Game::new(fuiz, options, host_id, &test_settings());
+
+        let host_tunnel = MockTunnel::new();
+        let tunnel_finder = |id: crate::watcher::Id| {
+            if id == host_id { Some(host_tunnel.clone()) } else { None }
+        };
+
+        game.kick_watcher(host_id, tunnel_finder);
+        assert!(game.watchers.has_watcher(host_id));
+    }
+
+    #[test]
+    fn test_game_kick_non_host_player_only() {
+        let fuiz = create_test_fuiz();
+        let options = Options::default();
+        let host_id = crate::watcher::Id::new();
+        let mut game = Game::new(fuiz, options, host_id, &test_settings());
+
+        let player_id = crate::watcher::Id::new();
+        let player_tunnel = MockTunnel::new();
+        let tunnel_finder = |id: crate::watcher::Id| {
+            if id == player_id {
+                Some(player_tunnel.clone())
+            } else {
+                None
+            }
+        };
+
+        // Players cannot kick anyone — `follows` rejects the Host message.
+        assert!(game.add_unassigned(player_id, tunnel_finder).is_ok());
+        let other = crate::watcher::Id::new();
+        let other_finder = |_: crate::watcher::Id| Some(player_tunnel.clone());
+        assert!(game.add_unassigned(other, other_finder).is_ok());
+        assert!(game.assign_player_name(other, "Target", other_finder).is_ok());
+
+        let schedule_message = |_: crate::AlarmMessage, _: std::time::Duration| {};
+        game.receive_message(
+            player_id,
+            IncomingMessage::Host(IncomingHostMessage::Kick("Target".to_owned())),
+            schedule_message,
+            tunnel_finder,
+        );
+        assert!(game.watchers.has_watcher(other));
     }
 
     #[test]
