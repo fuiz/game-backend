@@ -86,6 +86,16 @@ pub struct SlideConfig {
     /// Accompanying media
     #[garde(dive)]
     media: Option<Media>,
+    /// Duration of the slide-announcement intro shown before the question — an
+    /// animation naming the question type and its scoring. Absent → a default
+    /// duration; `null` → host-paced (must skip manually); a value → auto-advance
+    /// after it. The host can always skip early.
+    #[garde(custom(|val, ctx: &crate::settings::Settings| ctx.question.validate_introduce_slide(val)))]
+    #[serde(
+        default = "crate::fuiz::common::default_introduce_slide",
+        with = "serde_with::As::<Option<DurationMilliSeconds<u64>>>"
+    )]
+    introduce_slide: Option<Duration>,
     /// Time before the question is displayed.
     /// `None` means host-paced: the host must manually advance.
     #[garde(custom(|val, ctx: &crate::settings::Settings| ctx.question.validate_introduce_question(val)))]
@@ -152,6 +162,20 @@ impl SlideConfig {
 /// Messages sent to the listeners to update their pre-existing state with the slide state
 #[derive(Debug, Serialize, Clone)]
 pub enum UpdateMessage<'a> {
+    /// Announces the upcoming question's type and scoring before the question
+    /// itself is shown (the `Unstarted` phase). Players see an intro animation.
+    SlideAnnouncement {
+        /// Index of the current slide (0-based)
+        index: usize,
+        /// Total number of slides in the game
+        count: usize,
+        /// Maximum points awarded for a correct answer
+        points_awarded: u64,
+        /// Duration of the intro before the question is shown, or `None` for
+        /// host-paced (the host must advance manually)
+        #[serde(with = "serde_with::As::<Option<DurationMilliSeconds<u64>>>")]
+        duration: Option<Duration>,
+    },
     /// Announcement of the question without its answers
     QuestionAnnouncement {
         /// Index of the slide (0-indexing)
@@ -195,6 +219,19 @@ pub type AlarmMessage = ProceedFromSlideIntoSlide<Phase>;
 /// See [`UpdateMessage`] for explaination of these fields.
 #[derive(Debug, Serialize, Clone)]
 pub enum SyncMessage<'a> {
+    /// Synchronizes the slide-announcement intro phase (`Unstarted`)
+    SlideAnnouncement {
+        /// Index of the current slide
+        index: usize,
+        /// Total number of slides in the game
+        count: usize,
+        /// Maximum points awarded for a correct answer
+        points_awarded: u64,
+        /// Duration of the intro before the question is shown, or `None` for
+        /// host-paced
+        #[serde(with = "serde_with::As::<Option<DurationMilliSeconds<u64>>>")]
+        duration: Option<Duration>,
+    },
     /// Announcement of the question without its answers
     QuestionAnnouncement {
         /// Index of the current slide
@@ -310,7 +347,9 @@ impl PhasedSlide<Vec<String>> for State {
         count: usize,
     ) {
         match phase {
-            Phase::Unstarted => {}
+            Phase::Unstarted => {
+                self.announce_slide(watchers, schedule_message, tunnel_finder, index, count);
+            }
             Phase::Question => {
                 if !self.change_state(Phase::Unstarted, Phase::Question) {
                     return;
@@ -326,8 +365,8 @@ impl PhasedSlide<Vec<String>> for State {
                     .into(),
                     &tunnel_finder,
                 );
-                if let Some(d) = self.config.introduce_question {
-                    if d.is_zero() {
+                if let Some(duration) = self.config.introduce_question {
+                    if duration.is_zero() {
                         self.enter_phase(
                             Phase::Answers,
                             None,
@@ -344,7 +383,7 @@ impl PhasedSlide<Vec<String>> for State {
                                 to: Phase::Answers,
                             }
                             .into(),
-                            d,
+                            duration,
                         );
                     }
                 }
@@ -388,6 +427,49 @@ impl PhasedSlide<Vec<String>> for State {
 }
 
 impl State {
+    /// Announces the upcoming question's type and scoring (the `Unstarted`
+    /// phase), then auto-advances to the question after `introduce_slide` —
+    /// immediately if zero, never if `None` (host-paced).
+    fn announce_slide<F: TunnelFinder, S: ScheduleMessageFn>(
+        &mut self,
+        watchers: &Watchers,
+        schedule_message: S,
+        tunnel_finder: F,
+        index: usize,
+        count: usize,
+    ) {
+        watchers.announce(
+            &UpdateMessage::SlideAnnouncement {
+                index,
+                count,
+                points_awarded: self.config.points_awarded,
+                duration: self.config.introduce_slide,
+            }
+            .into(),
+            &tunnel_finder,
+        );
+        match self.config.introduce_slide {
+            Some(duration) if duration.is_zero() => self.enter_phase(
+                Phase::Question,
+                None,
+                watchers,
+                schedule_message,
+                tunnel_finder,
+                index,
+                count,
+            ),
+            Some(duration) => schedule_message(
+                AlarmMessage {
+                    index,
+                    to: Phase::Question,
+                }
+                .into(),
+                duration,
+            ),
+            None => {}
+        }
+    }
+
     /// Starts the order slide by sending initial question announcements
     ///
     /// This method initiates the question flow by transitioning to the question phase
@@ -416,7 +498,7 @@ impl State {
         count: usize,
     ) {
         self.enter_phase(
-            Phase::Question,
+            Phase::Unstarted,
             None,
             watchers,
             schedule_message,
@@ -442,12 +524,21 @@ impl State {
     /// A `SyncMessage` appropriate for the current state
     pub fn state_message(&self, index: usize, count: usize) -> SyncMessage<'_> {
         match self.state() {
-            Phase::Unstarted | Phase::Question => SyncMessage::QuestionAnnouncement {
+            Phase::Unstarted => SyncMessage::SlideAnnouncement {
+                index,
+                count,
+                points_awarded: self.config.points_awarded,
+                duration: self.config.introduce_slide,
+            },
+            Phase::Question => SyncMessage::QuestionAnnouncement {
                 index,
                 count,
                 question: &self.config.title,
                 media: self.config.media.as_ref(),
-                duration: self.config.introduce_question.map(|d| d.saturating_sub(self.elapsed())),
+                duration: self
+                    .config
+                    .introduce_question
+                    .map(|duration| duration.saturating_sub(self.elapsed())),
             },
             Phase::Answers => SyncMessage::AnswersAnnouncement {
                 index,
@@ -456,7 +547,10 @@ impl State {
                 axis_labels: &self.config.axis_labels,
                 media: self.config.media.as_ref(),
                 answers: &self.shuffled_answers,
-                duration: self.config.time_limit.map(|d| d.saturating_sub(self.elapsed())),
+                duration: self
+                    .config
+                    .time_limit
+                    .map(|duration| duration.saturating_sub(self.elapsed())),
             },
             Phase::AnswersResults => SyncMessage::AnswersResults {
                 index,

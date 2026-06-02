@@ -224,11 +224,64 @@ pub enum IncomingGhostMessage {
     ClaimId(Id),
 }
 
+/// The host-facing screen a "Next" command was issued from.
+///
+/// Echoed back by the client so the server can ignore a stale "Next" — e.g.
+/// an impatient double-click made before the new screen rendered, which would
+/// otherwise advance the slide twice (the answering window getting skipped).
+/// A "Next" is acted on only when its screen still matches the live game state
+/// (see [`Game::current_host_screen`]).
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+pub enum HostScreen {
+    /// Pre-game lobby (waiting screen or team display).
+    Lobby,
+    /// A question slide, tagged with the slide's own phase. Each slide type
+    /// carries its own [`Phase`](crate::fuiz::common::Phase) so question types
+    /// are free to define their phases independently.
+    Slide(SlidePosition),
+    /// The post-question leaderboard for the slide at `index`.
+    Leaderboard {
+        /// Index of the slide whose leaderboard is shown.
+        index: usize,
+    },
+    /// The final summary screen.
+    Summary,
+}
+
+/// A slide's host-facing position: its index plus its own phase. One variant
+/// per question type, mirroring [`AlarmMessage`] so each type keeps its own
+/// `Phase` rather than collapsing into a shared enum.
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+pub enum SlidePosition {
+    /// A multiple-choice slide at `index` showing `phase`.
+    MultipleChoice {
+        /// Index of the slide being shown.
+        index: usize,
+        /// The slide's current phase.
+        phase: multiple_choice::Phase,
+    },
+    /// A type-answer slide at `index` showing `phase`.
+    TypeAnswer {
+        /// Index of the slide being shown.
+        index: usize,
+        /// The slide's current phase.
+        phase: type_answer::Phase,
+    },
+    /// An order slide at `index` showing `phase`.
+    Order {
+        /// Index of the slide being shown.
+        index: usize,
+        /// The slide's current phase.
+        phase: order::Phase,
+    },
+}
+
 /// Messages that can be sent by the game host
 #[derive(Debug, Deserialize, Clone)]
 pub enum IncomingHostMessage {
-    /// Advance to the next slide/question
-    Next,
+    /// Advance the screen identified by `HostScreen` to the next phase/slide.
+    /// Carries the host's current screen so a stale duplicate is ignored.
+    Next(HostScreen),
     /// Jump to a specific slide by index
     Index(usize),
     /// Lock or unlock the game to new participants
@@ -1010,6 +1063,17 @@ impl Game {
         Ok(())
     }
 
+    /// The host-facing screen currently displayed, used to validate an
+    /// incoming [`IncomingHostMessage::Next`] against the live game state.
+    fn current_host_screen(&self) -> HostScreen {
+        match &self.state {
+            State::WaitingScreen | State::TeamDisplay => HostScreen::Lobby,
+            State::Slide(current_slide) => HostScreen::Slide(current_slide.state.host_position(current_slide.index)),
+            State::Leaderboard(index) => HostScreen::Leaderboard { index: *index },
+            State::Done => HostScreen::Summary,
+        }
+    }
+
     /// Handles incoming messages from participants
     ///
     /// This method processes all incoming messages from participants, validates
@@ -1043,6 +1107,15 @@ impl Game {
             return;
         }
 
+        // Ignore a "Next" whose screen the game has already advanced past —
+        // e.g. a double-click issued before the new screen rendered. Acting on
+        // it would advance the slide twice (skipping the answering window).
+        if let IncomingMessage::Host(IncomingHostMessage::Next(screen)) = &message
+            && *screen != self.current_host_screen()
+        {
+            return;
+        }
+
         match message {
             IncomingMessage::Unassigned(_) if self.locked => {}
             IncomingMessage::Host(IncomingHostMessage::Lock(lock_state)) => {
@@ -1068,7 +1141,7 @@ impl Game {
             }
             message => match &mut self.state {
                 State::WaitingScreen | State::TeamDisplay => {
-                    if let IncomingMessage::Host(IncomingHostMessage::Next) = message {
+                    if let IncomingMessage::Host(IncomingHostMessage::Next(_)) = message {
                         self.play(schedule_message, &tunnel_finder);
                     }
                 }
@@ -1088,7 +1161,7 @@ impl Game {
                     }
                 }
                 State::Leaderboard(index) => {
-                    if let IncomingMessage::Host(IncomingHostMessage::Next) = message {
+                    if let IncomingMessage::Host(IncomingHostMessage::Next(_)) = message {
                         let next_index = *index + 1;
                         if let Some(slide) = self.fuiz_config.slides.get(next_index) {
                             let mut state = slide.to_state();
@@ -1112,7 +1185,7 @@ impl Game {
                     }
                 }
                 State::Done => {
-                    if let IncomingMessage::Host(IncomingHostMessage::Next) = message {
+                    if let IncomingMessage::Host(IncomingHostMessage::Next(_)) = message {
                         self.mark_as_done(tunnel_finder);
                     }
                 }
@@ -1804,9 +1877,26 @@ mod tests {
     #[test]
     fn test_incoming_message_deserialization() {
         // Test IncomingMessage enum deserialization
-        let host_message_json = r#"{"Host": "Next"}"#;
+        let host_message_json =
+            r#"{"Host": {"Next": {"Slide": {"MultipleChoice": {"index": 2, "phase": "Answers"}}}}}"#;
         let host_message: IncomingMessage = serde_json::from_str(host_message_json).unwrap();
-        assert!(matches!(host_message, IncomingMessage::Host(_)));
+        assert!(matches!(
+            host_message,
+            IncomingMessage::Host(IncomingHostMessage::Next(HostScreen::Slide(
+                SlidePosition::MultipleChoice {
+                    index: 2,
+                    phase: crate::fuiz::multiple_choice::Phase::Answers,
+                }
+            )))
+        ));
+
+        // Lobby / Summary screens serialize as bare unit variants.
+        let lobby_json = r#"{"Host": {"Next": "Lobby"}}"#;
+        let lobby_message: IncomingMessage = serde_json::from_str(lobby_json).unwrap();
+        assert!(matches!(
+            lobby_message,
+            IncomingMessage::Host(IncomingHostMessage::Next(HostScreen::Lobby))
+        ));
 
         let unassigned_message_json = r#"{"Unassigned": {"NameRequest": "Player1"}}"#;
         let unassigned_message: IncomingMessage = serde_json::from_str(unassigned_message_json).unwrap();
@@ -1879,7 +1969,7 @@ mod tests {
     #[test]
     fn test_incoming_message_follows() {
         // Test IncomingMessage::follows method
-        let host_msg = IncomingMessage::Host(IncomingHostMessage::Next);
+        let host_msg = IncomingMessage::Host(IncomingHostMessage::Next(HostScreen::Lobby));
         assert!(host_msg.follows(crate::watcher::ValueKind::Host));
         assert!(!host_msg.follows(crate::watcher::ValueKind::Player));
         assert!(!host_msg.follows(crate::watcher::ValueKind::Unassigned));
@@ -1985,7 +2075,7 @@ mod tests {
         assert!(game.assign_player_name(player_id, "TestPlayer", tunnel_finder).is_ok());
 
         // Try to send host message from player (should be ignored)
-        let invalid_msg = IncomingMessage::Host(IncomingHostMessage::Next);
+        let invalid_msg = IncomingMessage::Host(IncomingHostMessage::Next(HostScreen::Lobby));
         let schedule_message = |_: crate::AlarmMessage, _: std::time::Duration| {};
 
         game.receive_message(player_id, invalid_msg, schedule_message, tunnel_finder);
@@ -2099,7 +2189,7 @@ mod tests {
         let tunnel_finder = |_: crate::watcher::Id| None::<MockTunnel>;
 
         // Try to receive message from nonexistent watcher
-        let msg = IncomingMessage::Host(IncomingHostMessage::Next);
+        let msg = IncomingMessage::Host(IncomingHostMessage::Next(HostScreen::Lobby));
         let schedule_message = |_: crate::AlarmMessage, _: std::time::Duration| {};
 
         // Should not panic and should do nothing
@@ -2222,7 +2312,7 @@ mod tests {
         assert!(matches!(game.state, State::Leaderboard(_)));
 
         // Send next from host while in leaderboard state
-        let next_msg = IncomingMessage::Host(IncomingHostMessage::Next);
+        let next_msg = IncomingMessage::Host(IncomingHostMessage::Next(game.current_host_screen()));
         game.receive_message(host_id, next_msg, schedule_message, tunnel_finder);
 
         // Should be done (since only one slide in test fuiz)
@@ -2407,7 +2497,7 @@ mod tests {
         let schedule_message = |_: crate::AlarmMessage, _: std::time::Duration| {};
 
         // Send Next message in Done state - should call mark_as_done
-        let next_msg = IncomingMessage::Host(IncomingHostMessage::Next);
+        let next_msg = IncomingMessage::Host(IncomingHostMessage::Next(game.current_host_screen()));
         game.receive_message(host_id, next_msg, schedule_message, tunnel_finder);
 
         // State should still be Done but mark_as_done was called
@@ -2436,6 +2526,80 @@ mod tests {
 
         // State should not change (still in slide 0, not 999)
         assert!(matches!(game.state, State::Slide(_)));
+    }
+
+    #[test]
+    fn test_stale_host_next_is_ignored() {
+        // A second "Next" carrying the screen the host saw before the first
+        // click took effect must not advance the slide a second time.
+        let fuiz = create_test_fuiz();
+        let options = Options::default();
+        let host_id = crate::watcher::Id::new();
+        let mut game = Game::new(fuiz, options, host_id, &test_settings());
+
+        let tunnel_finder = |_: crate::watcher::Id| None::<MockTunnel>;
+        let schedule_message = |_: crate::AlarmMessage, _: std::time::Duration| {};
+
+        game.play(schedule_message, tunnel_finder);
+        let stale_screen = game.current_host_screen();
+
+        // First Next (matching the live screen) advances the phase.
+        game.receive_message(
+            host_id,
+            IncomingMessage::Host(IncomingHostMessage::Next(stale_screen)),
+            schedule_message,
+            tunnel_finder,
+        );
+        let advanced_screen = game.current_host_screen();
+        assert_ne!(stale_screen, advanced_screen);
+
+        // Second Next carrying the now-stale screen is ignored.
+        game.receive_message(
+            host_id,
+            IncomingMessage::Host(IncomingHostMessage::Next(stale_screen)),
+            schedule_message,
+            tunnel_finder,
+        );
+        assert_eq!(game.current_host_screen(), advanced_screen);
+    }
+
+    #[test]
+    fn test_slide_starts_on_announcement_phase() {
+        use crate::fuiz::multiple_choice::Phase;
+
+        let fuiz = create_test_fuiz();
+        let options = Options::default();
+        let host_id = crate::watcher::Id::new();
+        let mut game = Game::new(fuiz, options, host_id, &test_settings());
+
+        let tunnel_finder = |_: crate::watcher::Id| None::<MockTunnel>;
+        let schedule_message = |_: crate::AlarmMessage, _: std::time::Duration| {};
+
+        // Playing a slide starts on the announcement (`Unstarted`), not the question.
+        game.play(schedule_message, tunnel_finder);
+        assert!(matches!(
+            game.current_host_screen(),
+            HostScreen::Slide(SlidePosition::MultipleChoice {
+                index: 0,
+                phase: Phase::Unstarted,
+            })
+        ));
+
+        // Advancing reveals the question.
+        let screen = game.current_host_screen();
+        game.receive_message(
+            host_id,
+            IncomingMessage::Host(IncomingHostMessage::Next(screen)),
+            schedule_message,
+            tunnel_finder,
+        );
+        assert!(matches!(
+            game.current_host_screen(),
+            HostScreen::Slide(SlidePosition::MultipleChoice {
+                phase: Phase::Question,
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -2786,7 +2950,7 @@ mod tests {
         assert!(matches!(game.state, State::Leaderboard(0)));
 
         // Send next from host - should advance to slide 1
-        let next_msg = IncomingMessage::Host(IncomingHostMessage::Next);
+        let next_msg = IncomingMessage::Host(IncomingHostMessage::Next(game.current_host_screen()));
         game.receive_message(host_id, next_msg, schedule_message, tunnel_finder);
         assert!(matches!(game.state, State::Slide(_)));
 
@@ -2795,7 +2959,7 @@ mod tests {
         assert!(matches!(game.state, State::Leaderboard(1)));
 
         // Send next from host - should be done (no more slides)
-        let next_msg = IncomingMessage::Host(IncomingHostMessage::Next);
+        let next_msg = IncomingMessage::Host(IncomingHostMessage::Next(game.current_host_screen()));
         game.receive_message(host_id, next_msg, schedule_message, tunnel_finder);
         assert!(matches!(game.state, State::Done));
     }

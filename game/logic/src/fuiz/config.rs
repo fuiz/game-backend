@@ -173,6 +173,29 @@ pub enum SlideAction<S: ScheduleMessageFn> {
 }
 
 impl SlideState {
+    /// The host-facing position (slide index + this slide's own phase) currently
+    /// shown, used to tag the host's "Next" command so a stale duplicate click is
+    /// ignored (see [`crate::game::HostScreen`]). Each slide type carries its own
+    /// `Phase`, so slides are free to define their phases independently.
+    pub(crate) fn host_position(&self, index: usize) -> crate::game::SlidePosition {
+        use crate::fuiz::common::SlideStateManager;
+        use crate::game::SlidePosition;
+        match self {
+            Self::MultipleChoice(s) => SlidePosition::MultipleChoice {
+                index,
+                phase: s.state(),
+            },
+            Self::TypeAnswer(s) => SlidePosition::TypeAnswer {
+                index,
+                phase: s.state(),
+            },
+            Self::Order(s) => SlidePosition::Order {
+                index,
+                phase: s.state(),
+            },
+        }
+    }
+
     /// Starts playing this slide and manages its lifecycle
     ///
     /// This method initiates the slide presentation, handles timing,
@@ -571,7 +594,7 @@ mod tests {
         let tunnel_finder = create_mock_tunnel_finder();
         let mut leaderboard = create_mock_leaderboard();
         let schedule_message = |_msg: AlarmMessage, _duration: std::time::Duration| {};
-        let message = IncomingMessage::Host(IncomingHostMessage::Next);
+        let message = IncomingMessage::Host(IncomingHostMessage::Next(crate::game::HostScreen::Lobby));
 
         let _result = state.receive_message(
             &mut leaderboard,
@@ -597,7 +620,7 @@ mod tests {
         let tunnel_finder = create_mock_tunnel_finder();
         let mut leaderboard = create_mock_leaderboard();
         let schedule_message = |_msg: AlarmMessage, _duration: std::time::Duration| {};
-        let message = IncomingMessage::Host(IncomingHostMessage::Next);
+        let message = IncomingMessage::Host(IncomingHostMessage::Next(crate::game::HostScreen::Lobby));
 
         let _result = state.receive_message(
             &mut leaderboard,
@@ -623,7 +646,7 @@ mod tests {
         let tunnel_finder = create_mock_tunnel_finder();
         let mut leaderboard = create_mock_leaderboard();
         let schedule_message = |_msg: AlarmMessage, _duration: std::time::Duration| {};
-        let message = IncomingMessage::Host(IncomingHostMessage::Next);
+        let message = IncomingMessage::Host(IncomingHostMessage::Next(crate::game::HostScreen::Lobby));
 
         let _result = state.receive_message(
             &mut leaderboard,

@@ -73,6 +73,10 @@ pub struct QuestionSettings {
     pub min_introduce_question: u64,
     /// Maximum time in seconds to introduce/display a question.
     pub max_introduce_question: u64,
+    /// Minimum duration in seconds of the slide-announcement intro.
+    pub min_introduce_slide: u64,
+    /// Maximum duration in seconds of the slide-announcement intro.
+    pub max_introduce_slide: u64,
 }
 
 /// Multiple-choice-specific limits.
@@ -135,6 +139,8 @@ impl Default for QuestionSettings {
             max_time_limit: 240,
             min_introduce_question: 0,
             max_introduce_question: 240,
+            min_introduce_slide: 0,
+            max_introduce_slide: 240,
         }
     }
 }
@@ -186,7 +192,7 @@ impl QuestionSettings {
     pub fn validate_time_limit(&self, val: &Option<Duration>) -> garde::Result {
         match val {
             None => Ok(()),
-            Some(d) => validate_duration_range(d, self.min_time_limit, self.max_time_limit),
+            Some(duration) => validate_duration_range(duration, self.min_time_limit, self.max_time_limit),
         }
     }
 
@@ -198,7 +204,22 @@ impl QuestionSettings {
     pub fn validate_introduce_question(&self, val: &Option<Duration>) -> garde::Result {
         match val {
             None => Ok(()),
-            Some(d) => validate_duration_range(d, self.min_introduce_question, self.max_introduce_question),
+            Some(duration) => {
+                validate_duration_range(duration, self.min_introduce_question, self.max_introduce_question)
+            }
+        }
+    }
+
+    /// Validate that a slide-announcement duration is within bounds. `None`
+    /// (host-paced, no auto-advance) is always valid.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`garde::Error`] if the duration is outside the configured bounds.
+    pub fn validate_introduce_slide(&self, val: &Option<Duration>) -> garde::Result {
+        match val {
+            None => Ok(()),
+            Some(duration) => validate_duration_range(duration, self.min_introduce_slide, self.max_introduce_slide),
         }
     }
 }
@@ -246,5 +267,33 @@ impl Settings {
     /// ```
     pub fn figment() -> figment::Figment {
         figment::Figment::from(Self::default())
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_introduce_slide_bounds() {
+        let question = QuestionSettings::default();
+
+        // Host-paced (no auto-advance) is always valid.
+        assert!(question.validate_introduce_slide(&None).is_ok());
+        // Within the default [0, 240] bounds.
+        assert!(question.validate_introduce_slide(&Some(Duration::ZERO)).is_ok());
+        assert!(question.validate_introduce_slide(&Some(Duration::from_secs(3))).is_ok());
+        assert!(
+            question
+                .validate_introduce_slide(&Some(Duration::from_secs(question.max_introduce_slide)))
+                .is_ok()
+        );
+        // Beyond the maximum is rejected.
+        assert!(
+            question
+                .validate_introduce_slide(&Some(Duration::from_secs(question.max_introduce_slide + 1)))
+                .is_err()
+        );
     }
 }

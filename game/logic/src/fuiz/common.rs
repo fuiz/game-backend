@@ -34,6 +34,16 @@ pub trait Phase: Copy + Eq + std::fmt::Debug + Default + Serialize + serde::de::
     fn next(self) -> Option<Self>;
 }
 
+/// Default duration of the slide-announcement intro when the config omits the
+/// field. `Some` means auto-advance after this long; an explicit `null` in the
+/// config maps to `None` (host-paced). Used as the `serde(default)` for each
+/// slide type's `introduce_slide`, so it must return the field type
+/// (`Option<Duration>`) even though it's always `Some`.
+#[allow(clippy::unnecessary_wraps)]
+pub(crate) fn default_introduce_slide() -> Option<Duration> {
+    Some(Duration::from_secs(2))
+}
+
 /// Runtime state shared by every slide type: phase, timer, live-answered tally.
 ///
 /// Embedded in each slide's `State` as `core: SlideCore<Self::Phase>` (with
@@ -596,7 +606,7 @@ pub(crate) trait QuestionReceiveMessage {
         count: usize,
     ) -> SlideAction<S> {
         match message {
-            crate::game::IncomingMessage::Host(crate::game::IncomingHostMessage::Next) => self.receive_host_next(
+            crate::game::IncomingMessage::Host(crate::game::IncomingHostMessage::Next(_)) => self.receive_host_next(
                 leaderboard,
                 watchers,
                 team_manager,
