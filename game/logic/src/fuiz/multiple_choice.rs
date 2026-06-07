@@ -185,6 +185,8 @@ pub enum UpdateMessage<'a> {
         /// host-paced (the host must advance manually)
         #[serde(with = "serde_with::As::<Option<DurationMilliSeconds<u64>>>")]
         duration: Option<Duration>,
+        /// Whether the question accepts single or multiple answer selections
+        answer_mode: AnswerMode,
     },
     /// Announces the question without revealing answer options
     QuestionAnnouncement {
@@ -244,6 +246,8 @@ pub enum SyncMessage<'a> {
         /// host-paced
         #[serde(with = "serde_with::As::<Option<DurationMilliSeconds<u64>>>")]
         duration: Option<Duration>,
+        /// Whether the question accepts single or multiple answer selections
+        answer_mode: AnswerMode,
     },
     /// Synchronizes the question announcement phase
     QuestionAnnouncement {
@@ -518,6 +522,7 @@ impl State {
                 count,
                 points_awarded: self.config.points_awarded,
                 duration: self.config.introduce_slide,
+                answer_mode: self.config.answer_mode,
             }
             .into(),
             &tunnel_finder,
@@ -695,6 +700,7 @@ impl State {
                 count,
                 points_awarded: self.config.points_awarded,
                 duration: self.config.introduce_slide,
+                answer_mode: self.config.answer_mode,
             },
             Phase::Question => SyncMessage::QuestionAnnouncement {
                 index,
