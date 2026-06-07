@@ -286,8 +286,24 @@ pub enum IncomingHostMessage {
     Index(usize),
     /// Lock or unlock the game to new participants
     Lock(bool),
-    /// Remove a player by their assigned name and prevent them from reconnecting
+    /// Remove a player by their assigned name. Their watcher is dropped, so a
+    /// reconnect comes back as a fresh unnamed participant rather than the
+    /// kicked one.
     Kick(String),
+}
+
+/// Outcome of a reconnection attempt via [`Game::update_session`].
+///
+/// Returned rather than swallowed so callers cannot silently no-op when the
+/// watcher is gone (e.g. after a kick) — they must decide what to do with a
+/// [`Reconnect::NotFound`].
+#[must_use]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reconnect {
+    /// The watcher still existed and was re-synced to the current state.
+    Reclaimed,
+    /// No watcher held this id; the caller should admit a fresh participant.
+    NotFound,
 }
 
 /// Update messages sent to participants about game state changes
@@ -305,6 +321,10 @@ pub enum UpdateMessage<'a> {
     PlayerLeft(&'a str),
     /// Sent to a participant just before they are forcibly removed by the host
     Kicked,
+    /// Sent just before the connection is closed because the participant could
+    /// not join — the game is locked or at maximum players. The client should
+    /// surface the reason and stop reconnecting.
+    CannotJoin(watcher::Error),
     /// Update the team display screen
     TeamDisplay(TruncatedVec<&'a str>),
     /// Prompt the participant to choose a name
@@ -1029,20 +1049,12 @@ impl Game {
 
     // Network
 
-    /// Adds a new unassigned participant to the game
-    ///
-    /// This method registers a new participant in the game with unassigned status.
-    /// If the game is not locked, it immediately begins the name assignment process.
+    /// Adds a new unassigned participant to the game and begins name assignment.
     ///
     /// # Arguments
     ///
     /// * `watcher` - Unique ID for the new participant
     /// * `tunnel_finder` - Function to find communication tunnels for participants
-    ///
-    /// # Returns
-    ///
-    /// * `Ok(())` if the participant was added successfully
-    /// * `Err(watcher::Error)` if the ID is already in use or invalid
     ///
     /// # Type Parameters
     ///
@@ -1051,14 +1063,16 @@ impl Game {
     ///
     /// # Errors
     ///
-    /// If there are too many participants, the watcher may not be added.
-    ///
+    /// Returns [`watcher::Error::Locked`] if the game is locked or
+    /// [`watcher::Error::MaximumPlayers`] if it is full. In either case the
+    /// watcher is not added, so the caller should refuse the connection.
     pub fn add_unassigned<F: TunnelFinder>(&mut self, watcher: Id, tunnel_finder: F) -> Result<(), watcher::Error> {
-        self.watchers.add_watcher(watcher, Value::Unassigned)?;
-
-        if !self.locked {
-            self.handle_unassigned(watcher, tunnel_finder);
+        if self.locked {
+            return Err(watcher::Error::Locked);
         }
+
+        self.watchers.add_watcher(watcher, Value::Unassigned)?;
+        self.handle_unassigned(watcher, tunnel_finder);
 
         Ok(())
     }
@@ -1450,10 +1464,10 @@ impl Game {
     ///
     /// * `T` - Type implementing the Tunnel trait for participant communication
     /// * `F` - Function type for finding tunnels by participant ID
-    pub fn update_session<F: TunnelFinder>(&mut self, watcher_id: Id, tunnel_finder: F) {
+    pub fn update_session<F: TunnelFinder>(&mut self, watcher_id: Id, tunnel_finder: F) -> Reconnect {
         // Cheap kind probe — Copy value, borrow ends on this line.
         let Some(kind) = self.watchers.get_watcher_value_ref(watcher_id).map(Value::kind) else {
-            return;
+            return Reconnect::NotFound;
         };
 
         // Reconnection: re-add to the live set and let the active slide put
@@ -1467,7 +1481,7 @@ impl Game {
 
         // Re-fetch as a ref now that mutations are done — no clone.
         let Some(watcher_value) = self.watchers.get_watcher_value_ref(watcher_id) else {
-            return;
+            return Reconnect::NotFound;
         };
 
         match watcher_value {
@@ -1511,6 +1525,31 @@ impl Game {
             Value::Unassigned => {
                 self.handle_unassigned(watcher_id, &tunnel_finder);
             }
+        }
+
+        Reconnect::Reclaimed
+    }
+
+    /// Re-attach a connection to the game under `watcher_id`.
+    ///
+    /// Reclaims the existing watcher when one still holds the id; otherwise
+    /// (e.g. after a kick) admits a fresh unassigned participant under the same
+    /// id so the client is prompted to pick a name instead of being stranded
+    /// with no instructions. The id's origin — a server-assigned value or a
+    /// client-supplied routing tag — stays the transport's concern.
+    ///
+    /// Reclaiming an existing watcher always succeeds.
+    ///
+    /// # Errors
+    ///
+    /// Returns the fresh-admission error (the game is locked or at maximum
+    /// players) so callers can close the connection, matching how a brand-new
+    /// join is handled. Reclaiming an existing watcher never errors.
+    pub fn rejoin<F: TunnelFinder>(&mut self, watcher_id: Id, tunnel_finder: F) -> Result<(), watcher::Error> {
+        if matches!(self.update_session(watcher_id, &tunnel_finder), Reconnect::NotFound) {
+            self.add_unassigned(watcher_id, tunnel_finder)
+        } else {
+            Ok(())
         }
     }
 }
@@ -2046,8 +2085,12 @@ mod tests {
         // Lock the game
         game.locked = true;
 
-        // Try to add unassigned player - should still add but not process
-        assert!(game.add_unassigned(unassigned_id, tunnel_finder).is_ok());
+        // A locked game refuses new participants, just like a full one.
+        assert_eq!(
+            game.add_unassigned(unassigned_id, tunnel_finder),
+            Err(crate::watcher::Error::Locked)
+        );
+        assert!(!game.watchers.has_watcher(unassigned_id));
 
         // Process lock message from host
         let lock_msg = IncomingMessage::Host(IncomingHostMessage::Lock(false));
@@ -2126,6 +2169,63 @@ mod tests {
         assert!(player_msgs.iter().any(|m| m.contains("Kicked")));
         let host_msgs = host_tunnel.messages.lock().unwrap();
         assert!(host_msgs.iter().any(|m| m.contains("PlayerLeft")));
+    }
+
+    #[test]
+    fn test_game_rejoin_after_kick_admits_fresh_player() {
+        let fuiz = create_test_fuiz();
+        let options = Options::default();
+        let host_id = crate::watcher::Id::new();
+        let mut game = Game::new(fuiz, options, host_id, &test_settings());
+
+        let player_id = crate::watcher::Id::new();
+        let player_tunnel = MockTunnel::new();
+        let tunnel_finder = |id: crate::watcher::Id| {
+            if id == player_id {
+                Some(player_tunnel.clone())
+            } else {
+                None
+            }
+        };
+
+        assert!(game.add_unassigned(player_id, tunnel_finder).is_ok());
+        assert!(game.assign_player_name(player_id, "Victim", tunnel_finder).is_ok());
+        game.kick_watcher(player_id, tunnel_finder);
+        assert!(!game.watchers.has_watcher(player_id));
+
+        // The client still holds its old id and reconnects with it. Rather than
+        // a silent no-op, rejoin re-admits it as a fresh unnamed participant.
+        assert!(game.rejoin(player_id, tunnel_finder).is_ok());
+        assert!(game.watchers.has_watcher(player_id));
+        assert_eq!(
+            game.watchers.get_watcher_value(player_id).map(|v| v.kind()),
+            Some(crate::watcher::ValueKind::Unassigned)
+        );
+
+        // They are prompted to choose a name instead of being stranded.
+        let player_msgs = player_tunnel.messages.lock().unwrap();
+        assert!(player_msgs.iter().any(|m| m.contains("NameChoose")));
+    }
+
+    #[test]
+    fn test_game_rejoin_locked_game_is_refused() {
+        let fuiz = create_test_fuiz();
+        let options = Options::default();
+        let host_id = crate::watcher::Id::new();
+        let mut game = Game::new(fuiz, options, host_id, &test_settings());
+
+        let player_id = crate::watcher::Id::new();
+        let tunnel_finder = |_: crate::watcher::Id| None::<MockTunnel>;
+
+        game.locked = true;
+
+        // A kicked/new client reconnecting to a locked game is refused, just
+        // like one hitting the player cap, so the transport closes it.
+        assert_eq!(
+            game.rejoin(player_id, tunnel_finder),
+            Err(crate::watcher::Error::Locked)
+        );
+        assert!(!game.watchers.has_watcher(player_id));
     }
 
     #[test]
@@ -2372,7 +2472,7 @@ mod tests {
         };
 
         // Update host session
-        game.update_session(host_id, tunnel_finder);
+        assert_eq!(game.update_session(host_id, tunnel_finder), Reconnect::Reclaimed);
 
         // Verify messages were sent (would check tunnel.messages in real test)
     }
@@ -2403,7 +2503,7 @@ mod tests {
         assert!(game.assign_player_name(player_id, "TestPlayer", tunnel_finder).is_ok());
 
         // Update player session - should work with team manager
-        game.update_session(player_id, tunnel_finder);
+        assert_eq!(game.update_session(player_id, tunnel_finder), Reconnect::Reclaimed);
     }
 
     #[test]
@@ -2423,12 +2523,13 @@ mod tests {
             }
         };
 
-        // Add unassigned player
-        game.locked = true; // Lock game first
+        // Join while open, then the host locks the game.
         assert!(game.add_unassigned(unassigned_id, tunnel_finder).is_ok());
+        game.locked = true;
 
-        // Update session - should do nothing since locked and unassigned
-        game.update_session(unassigned_id, tunnel_finder);
+        // Reconnecting reclaims the existing watcher but sends nothing, since it
+        // is still unnamed and the game is now locked.
+        assert_eq!(game.update_session(unassigned_id, tunnel_finder), Reconnect::Reclaimed);
     }
 
     #[test]
@@ -3199,8 +3300,8 @@ mod tests {
         let nonexistent_id = crate::watcher::Id::new();
         let tunnel_finder = |_: crate::watcher::Id| None::<MockTunnel>;
 
-        // Should not panic when updating session for nonexistent watcher
-        game.update_session(nonexistent_id, tunnel_finder);
+        // A nonexistent watcher reports NotFound rather than silently no-opping.
+        assert_eq!(game.update_session(nonexistent_id, tunnel_finder), Reconnect::NotFound);
     }
 
     #[test]
@@ -3511,7 +3612,7 @@ mod tests {
         assert!(game.assign_player_name(player_id, "TestPlayer", tunnel_finder).is_ok());
 
         // Update session for individual player (no teams)
-        game.update_session(player_id, tunnel_finder);
+        assert_eq!(game.update_session(player_id, tunnel_finder), Reconnect::Reclaimed);
     }
 
     #[test]

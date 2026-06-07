@@ -246,16 +246,23 @@ async fn watch(
                     if let Ok(message) = serde_json::from_str(s.as_ref()) {
                         match watcher_id {
                             None => match message {
-                                IncomingMessage::Ghost(IncomingGhostMessage::ClaimId(id))
-                                    if matches!(data_thread.game_manager.watcher_exists(game_id, id), Ok(true)) =>
-                                {
+                                IncomingMessage::Ghost(IncomingGhostMessage::ClaimId(id)) => {
                                     data_thread.game_manager.set_tunnel(id, own_session.clone());
-
-                                    if data_thread.game_manager.update_session(game_id, id).is_err() {
-                                        break;
-                                    }
-
                                     watcher_id = Some(id);
+
+                                    // Reclaims the watcher if it still exists, otherwise
+                                    // re-admits it as a fresh unnamed participant under the
+                                    // same id (e.g. after a kick) so the client is prompted
+                                    // to choose a name rather than left stranded. A full game
+                                    // closes the connection, just like a brand-new join.
+                                    match data_thread.game_manager.rejoin(game_id, id) {
+                                        Err(_) => break,
+                                        Ok(Err(error)) => {
+                                            own_session.send_message(&UpdateMessage::CannotJoin(error).into());
+                                            own_session.clone().close();
+                                        }
+                                        Ok(Ok(())) => {}
+                                    }
                                 }
                                 IncomingMessage::Ghost(_) => {
                                     let new_id = Id::new();
@@ -266,10 +273,14 @@ async fn watch(
                                     data_thread.game_manager.set_tunnel(new_id, own_session.clone());
 
                                     match data_thread.game_manager.add_unassigned(game_id, new_id) {
-                                        Err(_) | Ok(Err(_)) => {
+                                        Err(_) => {
                                             own_session.clone().close();
                                         }
-                                        _ => {}
+                                        Ok(Err(error)) => {
+                                            own_session.send_message(&UpdateMessage::CannotJoin(error).into());
+                                            own_session.clone().close();
+                                        }
+                                        Ok(Ok(())) => {}
                                     }
                                 }
                                 _ => {}

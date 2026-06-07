@@ -336,7 +336,8 @@ impl DurableObject for Game {
                         session.send_message(&game::UpdateMessage::IdAssign(watcher_id).into());
 
                         self.with_mut_game_update_storage(|game| {
-                            if game.add_unassigned(watcher_id, self.tunnel_finder()).is_err() {
+                            if let Err(error) = game.add_unassigned(watcher_id, self.tunnel_finder()) {
+                                session.send_message(&game::UpdateMessage::CannotJoin(error).into());
                                 session.close();
                             }
                         })
@@ -354,7 +355,10 @@ impl DurableObject for Game {
                         session.send_message(&game::UpdateMessage::IdAssign(watcher_id).into());
 
                         self.with_mut_game_update_storage(|game| {
-                            game.update_session(watcher_id, self.tunnel_finder());
+                            if let Err(error) = game.rejoin(watcher_id, self.tunnel_finder()) {
+                                session.send_message(&game::UpdateMessage::CannotJoin(error).into());
+                                session.close();
+                            }
                         })
                         .await?;
                     }
@@ -385,7 +389,12 @@ impl DurableObject for Game {
                         close_connections_with_tag(&self.state, &id);
                         ws.serialize_attachment(id)?;
 
-                        game.update_session(id, self.tunnel_finder());
+                        let session = WebSocketTunnel(ws);
+
+                        if let Err(error) = game.rejoin(id, self.tunnel_finder()) {
+                            session.send_message(&game::UpdateMessage::CannotJoin(error).into());
+                            session.close();
+                        }
                     } else {
                         let new_id = watcher::Id::new();
 
@@ -395,7 +404,8 @@ impl DurableObject for Game {
 
                         session.send_message(&game::UpdateMessage::IdAssign(new_id).into());
 
-                        if game.add_unassigned(new_id, self.tunnel_finder()).is_err() {
+                        if let Err(error) = game.add_unassigned(new_id, self.tunnel_finder()) {
+                            session.send_message(&game::UpdateMessage::CannotJoin(error).into());
                             session.close();
                         }
                     }

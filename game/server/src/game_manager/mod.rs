@@ -110,10 +110,6 @@ impl GameManager {
             .ok_or(GameVanish {})
     }
 
-    pub fn watcher_exists(&self, game_id: GameId, watcher_id: Id) -> Result<bool, GameVanish> {
-        self.with_game(game_id, |game| game.watchers.has_watcher(watcher_id))
-    }
-
     pub fn receive_message<F: Fn(AlarmMessage, Duration)>(
         &self,
         game_id: GameId,
@@ -147,10 +143,8 @@ impl GameManager {
         self.with_game(game_id, |_| ())
     }
 
-    pub fn update_session(&self, game_id: GameId, watcher_id: Id) -> Result<(), GameVanish> {
-        self.with_game_mut(game_id, |game| {
-            game.update_session(watcher_id, |id| self.tunnel_finder(id));
-        })
+    pub fn rejoin(&self, game_id: GameId, watcher_id: Id) -> Result<Result<(), watcher::Error>, GameVanish> {
+        self.with_game_mut(game_id, |game| game.rejoin(watcher_id, |id| self.tunnel_finder(id)))
     }
 
     pub fn remove_game(&self, game_id: GameId) {

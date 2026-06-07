@@ -196,6 +196,9 @@ pub enum Error {
     /// The game has reached the maximum number of allowed players
     #[error("maximum number of players reached")]
     MaximumPlayers,
+    /// The game is locked, so no new participants may join
+    #[error("game is locked")]
+    Locked,
 }
 
 impl Watchers {
