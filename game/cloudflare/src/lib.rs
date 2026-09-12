@@ -80,10 +80,13 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
         .post_async("/add", |mut req, ctx| async move {
             console_log!("Received /add request");
 
-            let game_request = req.json::<game::GameRequest>().await.map_err(|e| {
-                console_error!("Error parsing request: {:?}", e);
-                Error::RustError("Invalid request".to_string())
-            })?;
+            let game_request = match req.json::<game::GameRequest>().await {
+                Ok(game_request) => game_request,
+                Err(e) => {
+                    console_error!("Error parsing request: {:?}", e);
+                    return Response::error(format!("Invalid request: {e}"), 400);
+                }
+            };
 
             let settings = fuiz::settings::Settings::default();
             if let Err(e) = game_request.validate_with(&settings) {
