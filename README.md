@@ -40,6 +40,32 @@ To run the corkboard server locally:
 cargo run -p corkboard-server
 ```
 
+## Configuration
+
+Both servers read their settings from environment variables:
+
+| Variable                    | Default            | Description                                            |
+| --------------------------- | ------------------ | ------------------------------------------------------ |
+| `FUIZ_HOSTNAME`             | `0.0.0.0`          | Game server bind address                               |
+| `FUIZ_PORT`                 | `8080`             | Game server port                                       |
+| `FUIZ_ALLOWED_ORIGINS`      | `[]`               | Allowed CORS origins as a JSON array; empty allows any |
+| `CORKBOARD_HOSTNAME`        | `0.0.0.0`          | Image server bind address                              |
+| `CORKBOARD_PORT`            | `5040`             | Image server port                                      |
+| `CORKBOARD_ALLOWED_ORIGINS` | `[]`               | Allowed CORS origins as a JSON array; empty allows any |
+| `CORKBOARD_STORAGE_DIR`     | `./corkboard-data` | Where uploaded images are stored                       |
+| `CORKBOARD_CACHE_SIZE`      | `268435456`        | In-memory image cache size in bytes (256 MiB)          |
+
+Game limits from [settings.rs](game/logic/src/settings.rs) can be overridden with `FUIZ_SETTINGS_`, using `__` between levels, for example `FUIZ_SETTINGS_FUIZ__MAX_PLAYER_COUNT=2000`. The website enforces its own copy of these limits in `src/lib/limits.ts`, so keep the two in sync.
+
+## Self-Hosting
+
+CI publishes both servers as Docker images:
+
+- `registry.gitlab.com/fuiz/game-backend/fuiz-server`
+- `registry.gitlab.com/fuiz/game-backend/corkboard-server`
+
+[fuiz/self-hosted](https://gitlab.com/fuiz/self-hosted) runs them together with the website behind Caddy.
+
 ## License
 
 AGPL-3.0-or-later. See [LICENSE](LICENSE).
