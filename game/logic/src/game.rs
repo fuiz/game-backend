@@ -6,16 +6,18 @@
 //! connected participants.
 
 use std::fmt::Debug;
+use std::time::Duration;
 
 use garde::Validate;
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
+use serde_with::DurationMilliSeconds;
 
 use crate::tick::Tick;
 use crate::{
     fuiz::{
         brainstorm,
-        config::{CurrentSlide, ScheduleMessageFn, SlideAction},
+        config::{CurrentSlide, ScheduleMessageFn, SlideAction, SlideState},
         free_text, info_slide, order, pin, poll, scale, slider, type_answer,
     },
     watcher::Value,
@@ -79,6 +81,105 @@ pub enum Profanity {
     Allow,
 }
 
+/// Whether the game advances past host-paced screens on its own, and how long
+/// each stays up first. A `None` delay leaves that screen waiting for the
+/// host's "Next".
+///
+/// Only screens that would otherwise sit until the host acts are covered: a
+/// slide's own timers already move its earlier phases along. The lobby and the
+/// final summary are never advanced automatically.
+///
+/// Every field is optional on the wire; a missing one takes its value from
+/// [`AutoAdvance::default`], so a client can switch auto-advance on without
+/// choosing delays.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Validate)]
+#[garde(context(crate::settings::Settings as ctx))]
+#[serde(default)]
+pub struct AutoAdvance {
+    /// Whether auto-advance is on when the game starts. The host can switch
+    /// it either way during the game.
+    #[garde(skip)]
+    pub enabled: bool,
+    /// The team display shown before the first slide of a team game.
+    #[garde(custom(|val, ctx: &crate::settings::Settings| ctx.question.validate_auto_advance(val)))]
+    #[serde(with = "serde_with::As::<Option<DurationMilliSeconds<u64>>>")]
+    pub team_display: Option<Duration>,
+    /// A question's results, its last phase.
+    #[garde(custom(|val, ctx: &crate::settings::Settings| ctx.question.validate_auto_advance(val)))]
+    #[serde(with = "serde_with::As::<Option<DurationMilliSeconds<u64>>>")]
+    pub results: Option<Duration>,
+    /// The leaderboard between slides.
+    #[garde(custom(|val, ctx: &crate::settings::Settings| ctx.question.validate_auto_advance(val)))]
+    #[serde(with = "serde_with::As::<Option<DurationMilliSeconds<u64>>>")]
+    pub leaderboard: Option<Duration>,
+    /// An info slide with no duration of its own.
+    #[garde(custom(|val, ctx: &crate::settings::Settings| ctx.question.validate_auto_advance(val)))]
+    #[serde(with = "serde_with::As::<Option<DurationMilliSeconds<u64>>>")]
+    pub info_slide: Option<Duration>,
+}
+
+impl Default for AutoAdvance {
+    /// Off, with delays long enough to read each screen. The team display is
+    /// left to the host: players need time to find their teammates.
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            team_display: None,
+            results: Some(Duration::from_secs(8)),
+            leaderboard: Some(Duration::from_secs(5)),
+            info_slide: Some(Duration::from_secs(10)),
+        }
+    }
+}
+
+/// An auto-advance counting down on the host's screen.
+#[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "serializable", derive(Serialize, Deserialize))]
+struct PendingAutoAdvance {
+    /// The screen it will advance past.
+    screen: HostScreen,
+    /// When the countdown started.
+    since: crate::time::Timestamp,
+    /// How long the countdown runs.
+    delay: Duration,
+}
+
+/// Auto-advance as the host's controls show it.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct AutoAdvanceStatus {
+    /// Whether auto-advance is on.
+    running: bool,
+    /// The advance counting down on the current screen, if any.
+    next: Option<NextAdvance>,
+}
+
+/// A countdown to an automatic "Next", for [`AutoAdvanceStatus`].
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct NextAdvance {
+    /// The screen being advanced past. The host compares it against its own
+    /// screen, so a countdown never shows on a screen it doesn't belong to.
+    screen: HostScreen,
+    /// Time left before the game advances.
+    #[serde(with = "serde_with::As::<DurationMilliSeconds<u64>>")]
+    remaining: Duration,
+    /// The full length of the countdown.
+    #[serde(with = "serde_with::As::<DurationMilliSeconds<u64>>")]
+    delay: Duration,
+}
+
+/// Alarm that advances a host-paced screen once its [`AutoAdvance`] delay
+/// runs out: a "Next" the game issues to itself.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AutoAdvanceAlarm {
+    /// The screen the alarm was scheduled from. Like a host's "Next", it is
+    /// ignored once the game has moved past that screen.
+    screen: HostScreen,
+    /// [`Game::auto_advance_epoch`] when the alarm was scheduled. A pause and
+    /// resume on the same screen schedules a fresh alarm, and this tells the
+    /// older one apart.
+    epoch: u64,
+}
+
 /// Global configuration options for the game session
 ///
 /// These options affect the overall behavior of the game, including
@@ -104,6 +205,11 @@ pub struct Options {
     #[garde(skip)]
     #[serde(default)]
     profanity: Profanity,
+    /// Whether host-paced screens advance on their own, and after how long.
+    /// Off by default.
+    #[garde(dive)]
+    #[serde(default)]
+    auto_advance: AutoAdvance,
 }
 
 impl Options {
@@ -112,6 +218,13 @@ impl Options {
     #[must_use]
     pub fn with_profanity(mut self, profanity: Profanity) -> Self {
         self.profanity = profanity;
+        self
+    }
+
+    /// Builder-style override for the auto-advance settings.
+    #[must_use]
+    pub fn with_auto_advance(mut self, auto_advance: AutoAdvance) -> Self {
+        self.auto_advance = auto_advance;
         self
     }
 }
@@ -139,6 +252,18 @@ pub struct Game {
     locked: bool,
     /// Team formation and management (if teams are enabled)
     team_manager: Option<TeamManager<names::NameStyle>>,
+    /// Whether auto-advance is on. Starts from the options; the host switches
+    /// it from then on, and it holds until they switch it again.
+    #[cfg_attr(feature = "serializable", serde(default))]
+    auto_advance_running: bool,
+    /// Bumped every time the host switches auto-advance, so an
+    /// [`AutoAdvanceAlarm`] scheduled before the latest switch is recognizable
+    /// as stale.
+    #[cfg_attr(feature = "serializable", serde(default))]
+    auto_advance_epoch: u64,
+    /// The most recently scheduled auto-advance, for the host's countdown.
+    #[cfg_attr(feature = "serializable", serde(default))]
+    auto_advance_pending: Option<PendingAutoAdvance>,
 }
 
 impl Debug for Game {
@@ -347,6 +472,9 @@ pub enum IncomingHostMessage {
     Index(usize),
     /// Lock or unlock the game to new participants
     Lock(bool),
+    /// Switch auto-advance on (`true`) or off (`false`). Holds until switched
+    /// again; the host's own "Next" keeps working either way.
+    AutoAdvance(bool),
     /// Remove a player by their assigned name. Their watcher is dropped, so a
     /// reconnect comes back as a fresh unnamed participant rather than the
     /// kicked one.
@@ -437,6 +565,8 @@ pub enum UpdateMessage<'a> {
     /// export, where a dropped row is a missing answer rather than a longer
     /// screen. One entry per player bounds it.
     PlayerResponses(Vec<PlayerResponse<'a>>),
+    /// (HOST ONLY): auto-advance was switched, or a countdown started.
+    AutoAdvance(AutoAdvanceStatus),
     /// (HOST ONLY): who is on each team, and which of them are still connected.
     /// Sent in reply to [`IncomingHostMessage::RequestTeamRosters`].
     TeamRosters(Vec<TeamRoster<'a>>),
@@ -579,6 +709,8 @@ pub enum MetainfoMessage {
         /// `TeamDisplay` only reaches the host while that screen is up, which
         /// leaves a host who reloaded mid-game with no other way to tell.
         teams: bool,
+        /// Whether auto-advance is on, and the countdown on this screen.
+        auto_advance: AutoAdvanceStatus,
     },
     /// Information for players
     Player {
@@ -794,6 +926,9 @@ impl Game {
                 TeamManager::new(size, assign_random, options.random_names.unwrap_or_default())
             }),
             locked: false,
+            auto_advance_running: options.auto_advance.enabled,
+            auto_advance_epoch: 0,
+            auto_advance_pending: None,
         }
     }
 
@@ -1328,10 +1463,44 @@ impl Game {
             return;
         }
 
+        let before = (self.current_host_screen(), self.auto_advance_running);
+        let mut scheduled = None;
+        self.handle_message(
+            watcher_id,
+            message,
+            |alarm, delay| scheduled = Some((alarm, delay)),
+            tick,
+            &tunnel_finder,
+        );
+        self.schedule_alarm(before, scheduled, schedule_message, tick, &tunnel_finder);
+    }
+
+    /// Acts on a message [`Self::receive_message`] has already validated.
+    fn handle_message<F: TunnelFinder, S: ScheduleMessageFn>(
+        &mut self,
+        watcher_id: Id,
+        message: IncomingMessage,
+        schedule_message: S,
+        tick: Tick,
+        tunnel_finder: F,
+    ) {
         match message {
             IncomingMessage::Unassigned(_) if self.locked => {}
+            IncomingMessage::Host(IncomingHostMessage::Next(_)) => {
+                self.advance(schedule_message, tick, tunnel_finder);
+            }
             IncomingMessage::Host(IncomingHostMessage::Lock(lock_state)) => {
                 self.locked = lock_state;
+            }
+            IncomingMessage::Host(IncomingHostMessage::AutoAdvance(running)) => {
+                if running == self.auto_advance_running {
+                    return;
+                }
+                self.auto_advance_running = running;
+                self.auto_advance_epoch += 1;
+                if let Some((alarm, delay)) = self.auto_advance_alarm() {
+                    schedule_message(alarm, delay);
+                }
             }
             IncomingMessage::Host(IncomingHostMessage::Kick(target_name)) => {
                 if let Some(target_id) = self.names.get_id(&target_name) {
@@ -1357,14 +1526,9 @@ impl Game {
             IncomingMessage::Player(IncomingPlayerMessage::DeselectTeammate(name)) => {
                 self.handle_deselect_teammate(watcher_id, &name, &tunnel_finder);
             }
-            message => match &mut self.state {
-                State::WaitingScreen | State::TeamDisplay => {
-                    if let IncomingMessage::Host(IncomingHostMessage::Next(_)) = message {
-                        self.play(schedule_message, tick, &tunnel_finder);
-                    }
-                }
-                State::Slide(current_slide) => {
-                    if let SlideAction::Next { schedule_message, tick } = current_slide.state.receive_message(
+            message => {
+                if let State::Slide(current_slide) = &mut self.state
+                    && let SlideAction::Next { schedule_message, tick } = current_slide.state.receive_message(
                         &mut self.leaderboard,
                         &self.watchers,
                         self.team_manager.as_ref(),
@@ -1375,41 +1539,158 @@ impl Game {
                         message,
                         current_slide.index,
                         self.fuiz_config.len(),
-                    ) {
-                        self.finish_slide(schedule_message, tick, tunnel_finder);
-                    }
+                    )
+                {
+                    self.finish_slide(schedule_message, tick, tunnel_finder);
                 }
-                State::Leaderboard(index) => {
-                    if let IncomingMessage::Host(IncomingHostMessage::Next(_)) = message {
-                        let next_index = *index + 1;
-                        if let Some(slide) = self.fuiz_config.slides.get(next_index) {
-                            let mut state = slide.to_state();
+            }
+        }
+    }
 
-                            state.play(
-                                self.team_manager.as_ref(),
-                                &self.watchers,
-                                schedule_message,
-                                tick,
-                                &tunnel_finder,
-                                next_index,
-                                self.fuiz_config.len(),
-                            );
+    /// Moves past the current screen. What the host's "Next" does, and what
+    /// an [`AutoAdvanceAlarm`] does on the host's behalf.
+    fn advance<F: TunnelFinder, S: ScheduleMessageFn>(&mut self, schedule_message: S, tick: Tick, tunnel_finder: F) {
+        match &mut self.state {
+            State::WaitingScreen | State::TeamDisplay => {
+                self.play(schedule_message, tick, &tunnel_finder);
+            }
+            State::Slide(current_slide) => {
+                if let SlideAction::Next { schedule_message, tick } = current_slide.state.receive_host_next(
+                    &mut self.leaderboard,
+                    &self.watchers,
+                    self.team_manager.as_ref(),
+                    schedule_message,
+                    tick,
+                    &tunnel_finder,
+                    current_slide.index,
+                    self.fuiz_config.len(),
+                ) {
+                    self.finish_slide(schedule_message, tick, tunnel_finder);
+                }
+            }
+            State::Leaderboard(index) => {
+                let next_index = *index + 1;
+                if let Some(slide) = self.fuiz_config.slides.get(next_index) {
+                    let mut state = slide.to_state();
 
-                            self.set_state(State::Slide(Box::new(CurrentSlide {
-                                index: next_index,
-                                state,
-                            })));
-                        } else {
-                            self.announce_summary(&tunnel_finder);
-                        }
-                    }
+                    state.play(
+                        self.team_manager.as_ref(),
+                        &self.watchers,
+                        schedule_message,
+                        tick,
+                        &tunnel_finder,
+                        next_index,
+                        self.fuiz_config.len(),
+                    );
+
+                    self.set_state(State::Slide(Box::new(CurrentSlide {
+                        index: next_index,
+                        state,
+                    })));
+                } else {
+                    self.announce_summary(&tunnel_finder);
                 }
-                State::Done => {
-                    if let IncomingMessage::Host(IncomingHostMessage::Next(_)) = message {
-                        self.mark_as_done(tunnel_finder);
-                    }
-                }
+            }
+            State::Done => {
+                self.mark_as_done(tunnel_finder);
+            }
+        }
+    }
+
+    /// The alarm that advances the current screen, when that screen waits for
+    /// the host and is set to auto-advance, and the host hasn't paused it.
+    fn auto_advance_alarm(&self) -> Option<(AlarmMessage, Duration)> {
+        if !self.auto_advance_running {
+            return None;
+        }
+
+        let delays = self.options.auto_advance;
+        let delay = match &self.state {
+            State::TeamDisplay => delays.team_display,
+            State::Slide(current_slide) if current_slide.state.in_last_phase() => match &current_slide.state {
+                // An info slide with a duration of its own leaves on its own timer.
+                SlideState::InfoSlide(info_slide) if info_slide.duration().is_some() => None,
+                SlideState::InfoSlide(_) => delays.info_slide,
+                _ => delays.results,
             },
+            State::Leaderboard(_) => delays.leaderboard,
+            State::WaitingScreen | State::Slide(_) | State::Done => None,
+        }?;
+
+        Some((
+            AutoAdvanceAlarm {
+                screen: self.current_host_screen(),
+                epoch: self.auto_advance_epoch,
+            }
+            .into(),
+            delay,
+        ))
+    }
+
+    /// Passes on the one alarm a handler leaves behind: the one it scheduled
+    /// itself or, failing that, the auto-advance for a screen the game has
+    /// just arrived at. One at most, because a host may hold a single alarm
+    /// at a time, a later one replacing the earlier.
+    ///
+    /// `before` is the screen, and whether auto-advance was on, from before the
+    /// handler ran. The host hears about a countdown that starts, and about
+    /// auto-advance being switched.
+    fn schedule_alarm<F: TunnelFinder, S: ScheduleMessageFn>(
+        &mut self,
+        (screen_before, running_before): (HostScreen, bool),
+        scheduled: Option<(AlarmMessage, Duration)>,
+        schedule_message: S,
+        tick: Tick,
+        tunnel_finder: F,
+    ) {
+        let scheduled = scheduled.or_else(|| {
+            if self.current_host_screen() == screen_before {
+                None
+            } else {
+                self.auto_advance_alarm()
+            }
+        });
+
+        let counting_down =
+            if let Some((AlarmMessage::AutoAdvance(AutoAdvanceAlarm { screen, .. }), delay)) = &scheduled {
+                self.auto_advance_pending = Some(PendingAutoAdvance {
+                    screen: *screen,
+                    since: tick.now(),
+                    delay: *delay,
+                });
+                true
+            } else {
+                false
+            };
+
+        if counting_down || self.auto_advance_running != running_before {
+            self.watchers.announce_specific(
+                ValueKind::Host,
+                &UpdateMessage::AutoAdvance(self.auto_advance_status()).into(),
+                tunnel_finder,
+            );
+        }
+
+        if let Some((alarm, delay)) = scheduled {
+            schedule_message(alarm, delay);
+        }
+    }
+
+    /// Whether auto-advance is on, and the countdown on the current screen.
+    fn auto_advance_status(&self) -> AutoAdvanceStatus {
+        let next = self
+            .auto_advance_pending
+            .filter(|pending| self.auto_advance_running && pending.screen == self.current_host_screen())
+            .map(|pending| NextAdvance {
+                screen: pending.screen,
+                // Read-only, so the live clock is fine: nothing here is stored.
+                remaining: pending.delay.saturating_sub(pending.since.elapsed()),
+                delay: pending.delay,
+            });
+
+        AutoAdvanceStatus {
+            running: self.auto_advance_running,
+            next,
         }
     }
 
@@ -1437,7 +1718,35 @@ impl Game {
         tick: Tick,
         tunnel_finder: F,
     ) {
+        let before = (self.current_host_screen(), self.auto_advance_running);
+        let mut scheduled = None;
+        self.handle_alarm(
+            message,
+            |alarm, delay| scheduled = Some((alarm, delay)),
+            tick,
+            &tunnel_finder,
+        );
+        self.schedule_alarm(before, scheduled, schedule_message, tick, &tunnel_finder);
+    }
+
+    /// Acts on an alarm for [`Self::receive_alarm`].
+    fn handle_alarm<F: TunnelFinder, S: ScheduleMessageFn>(
+        &mut self,
+        message: &AlarmMessage,
+        schedule_message: S,
+        tick: Tick,
+        tunnel_finder: F,
+    ) {
         let slide_index = match message {
+            AlarmMessage::AutoAdvance(AutoAdvanceAlarm { screen, epoch }) => {
+                if self.auto_advance_running
+                    && *epoch == self.auto_advance_epoch
+                    && *screen == self.current_host_screen()
+                {
+                    self.advance(schedule_message, tick, tunnel_finder);
+                }
+                return;
+            }
             AlarmMessage::MultipleChoice(multiple_choice::AlarmMessage { index, to: _ })
             | AlarmMessage::TypeAnswer(type_answer::AlarmMessage { index, to: _ })
             | AlarmMessage::Order(order::AlarmMessage { index, to: _ })
@@ -1703,6 +2012,7 @@ impl Game {
                     &SyncMessage::Metainfo(MetainfoMessage::Host {
                         locked: self.locked,
                         teams: self.team_manager.is_some(),
+                        auto_advance: self.auto_advance_status(),
                     })
                     .into(),
                     watcher_id,
@@ -1839,6 +2149,7 @@ mod tests {
             no_leaderboard: false,
             teams: None,
             profanity: Profanity::Censor,
+            auto_advance: AutoAdvance::default(),
         };
 
         let json = serde_json::to_string(&game_options).unwrap();
@@ -1862,6 +2173,7 @@ mod tests {
             no_leaderboard: true,
             teams: Some(team_options),
             profanity: Profanity::Censor,
+            auto_advance: AutoAdvance::default(),
         };
 
         let json = serde_json::to_string(&game_options).unwrap();
@@ -1914,6 +2226,7 @@ mod tests {
             no_leaderboard: false,
             teams: None,
             profanity: Profanity::Censor,
+            auto_advance: AutoAdvance::default(),
         };
         let host_id = crate::watcher::Id::new();
 
@@ -1939,6 +2252,7 @@ mod tests {
             no_leaderboard: true,
             teams: Some(team_options),
             profanity: Profanity::Censor,
+            auto_advance: AutoAdvance::default(),
         };
         let host_id = crate::watcher::Id::new();
 
@@ -3216,6 +3530,10 @@ mod tests {
         let metainfo_host = SyncMessage::Metainfo(MetainfoMessage::Host {
             locked: true,
             teams: false,
+            auto_advance: AutoAdvanceStatus {
+                running: false,
+                next: None,
+            },
         });
         let json = serde_json::to_string(&metainfo_host).unwrap();
         assert!(json.contains("locked"));
@@ -3947,6 +4265,7 @@ mod tests {
                 assign_random: true,
             }),
             profanity: Profanity::Censor,
+            auto_advance: AutoAdvance::default(),
         };
         assert!(valid_options.validate_with(&test_settings()).is_ok());
 
@@ -3959,6 +4278,7 @@ mod tests {
                 assign_random: true,
             }),
             profanity: Profanity::Censor,
+            auto_advance: AutoAdvance::default(),
         };
         assert!(invalid_options.validate_with(&test_settings()).is_err());
     }
@@ -4207,5 +4527,316 @@ mod tests {
             to: crate::fuiz::order::Phase::Question,
         });
         assert!(matches!(order_alarm, crate::AlarmMessage::Order(_)));
+    }
+
+    /// Records every alarm a handler schedules, so a test can fire them later.
+    #[derive(Default)]
+    struct Scheduled(std::cell::RefCell<Vec<(crate::AlarmMessage, Duration)>>);
+
+    impl Scheduled {
+        fn sink(&self) -> impl FnOnce(crate::AlarmMessage, Duration) + '_ {
+            |alarm, delay| self.0.borrow_mut().push((alarm, delay))
+        }
+
+        /// The one alarm scheduled since the last call, if any.
+        fn take(&self) -> Option<(crate::AlarmMessage, Duration)> {
+            let mut scheduled = self.0.borrow_mut();
+            assert!(scheduled.len() <= 1, "a handler scheduled more than one alarm");
+            scheduled.pop()
+        }
+
+        /// The one alarm scheduled since the last call, which must be an
+        /// auto-advance.
+        fn take_auto_advance(&self) -> (crate::AlarmMessage, Duration) {
+            let scheduled = self.take().expect("nothing was scheduled");
+            assert!(matches!(scheduled.0, crate::AlarmMessage::AutoAdvance(_)));
+            scheduled
+        }
+    }
+
+    fn auto_advance_delays() -> AutoAdvance {
+        AutoAdvance {
+            enabled: true,
+            team_display: Some(Duration::from_secs(2)),
+            results: Some(Duration::from_secs(5)),
+            leaderboard: Some(Duration::from_secs(3)),
+            info_slide: Some(Duration::from_secs(4)),
+        }
+    }
+
+    fn two_question_fuiz() -> crate::fuiz::config::Fuiz {
+        let question = r#"{
+            "MultipleChoice": {
+                "title": "Question",
+                "media": null,
+                "introduce_question": 5000000000,
+                "time_limit": 30000000000,
+                "points_awarded": 1000,
+                "answers": [{"correct": true, "content": {"Text": "Answer"}}]
+            }
+        }"#;
+        serde_json::from_str(&format!(r#"{{"title": "Quiz", "slides": [{question}, {question}]}}"#)).unwrap()
+    }
+
+    /// Plays the first slide through to its results, the first screen that
+    /// waits for the host.
+    fn game_on_first_results(options: Options, scheduled: &Scheduled) -> (Game, Id) {
+        let host_id = Id::new();
+        let mut game = Game::new(two_question_fuiz(), options, host_id, &test_settings());
+        let tunnel_finder = |_: Id| None::<MockTunnel>;
+
+        game.play(|_, _| {}, Tick::default(), tunnel_finder);
+        while let State::Slide(current_slide) = &game.state
+            && !current_slide.state.in_last_phase()
+        {
+            scheduled.take();
+            let next = IncomingMessage::Host(IncomingHostMessage::Next(game.current_host_screen()));
+            game.receive_message(host_id, next, scheduled.sink(), Tick::default(), tunnel_finder);
+        }
+        (game, host_id)
+    }
+
+    fn fire(game: &mut Game, (alarm, _): &(crate::AlarmMessage, Duration), scheduled: &Scheduled) {
+        game.receive_alarm(alarm, scheduled.sink(), Tick::default(), |_: Id| None::<MockTunnel>);
+    }
+
+    fn send_host(game: &mut Game, host_id: Id, message: IncomingHostMessage, scheduled: &Scheduled) {
+        game.receive_message(
+            host_id,
+            IncomingMessage::Host(message),
+            scheduled.sink(),
+            Tick::default(),
+            |_: Id| None::<MockTunnel>,
+        );
+    }
+
+    fn send_next(game: &mut Game, host_id: Id, scheduled: &Scheduled) {
+        let screen = game.current_host_screen();
+        send_host(game, host_id, IncomingHostMessage::Next(screen), scheduled);
+    }
+
+    #[test]
+    fn auto_advance_walks_through_host_paced_screens() {
+        let scheduled = Scheduled::default();
+        let options = Options::default().with_auto_advance(auto_advance_delays());
+        let (mut game, _) = game_on_first_results(options, &scheduled);
+
+        let results_alarm = scheduled.take_auto_advance();
+        assert_eq!(results_alarm.1, Duration::from_secs(5));
+
+        fire(&mut game, &results_alarm, &scheduled);
+        assert!(matches!(game.state, State::Leaderboard(0)));
+        let leaderboard_alarm = scheduled.take_auto_advance();
+        assert_eq!(leaderboard_alarm.1, Duration::from_secs(3));
+
+        fire(&mut game, &leaderboard_alarm, &scheduled);
+        assert!(matches!(&game.state, State::Slide(current_slide) if current_slide.index == 1));
+        // The new slide runs on its own timers, not an auto-advance.
+        assert!(!matches!(
+            scheduled.take(),
+            Some((crate::AlarmMessage::AutoAdvance(_), _))
+        ));
+    }
+
+    #[test]
+    fn auto_advance_is_off_by_default() {
+        let scheduled = Scheduled::default();
+        let (mut game, host_id) = game_on_first_results(Options::default(), &scheduled);
+        assert!(scheduled.take().is_none());
+
+        send_next(&mut game, host_id, &scheduled);
+        assert!(matches!(game.state, State::Leaderboard(0)));
+        assert!(scheduled.take().is_none());
+    }
+
+    #[test]
+    fn auto_advance_alarm_is_stale_after_a_manual_next() {
+        let scheduled = Scheduled::default();
+        let options = Options::default().with_auto_advance(auto_advance_delays());
+        let (mut game, host_id) = game_on_first_results(options, &scheduled);
+        let results_alarm = scheduled.take_auto_advance();
+
+        send_next(&mut game, host_id, &scheduled);
+        assert!(matches!(game.state, State::Leaderboard(0)));
+        scheduled.take_auto_advance();
+
+        // The results alarm names a screen the host already left.
+        fire(&mut game, &results_alarm, &scheduled);
+        assert!(matches!(game.state, State::Leaderboard(0)));
+        assert!(scheduled.take().is_none());
+    }
+
+    #[test]
+    fn paused_auto_advance_holds_until_resumed() {
+        let scheduled = Scheduled::default();
+        let options = Options::default().with_auto_advance(auto_advance_delays());
+        let (mut game, host_id) = game_on_first_results(options, &scheduled);
+        let results_alarm = scheduled.take_auto_advance();
+
+        send_host(&mut game, host_id, IncomingHostMessage::AutoAdvance(false), &scheduled);
+        assert!(scheduled.take().is_none());
+        fire(&mut game, &results_alarm, &scheduled);
+        assert!(!matches!(game.state, State::Leaderboard(_)));
+
+        // Resuming schedules afresh; the alarm from before the pause stays dead.
+        send_host(&mut game, host_id, IncomingHostMessage::AutoAdvance(true), &scheduled);
+        let resumed_alarm = scheduled.take_auto_advance();
+        fire(&mut game, &results_alarm, &scheduled);
+        assert!(!matches!(game.state, State::Leaderboard(_)));
+        fire(&mut game, &resumed_alarm, &scheduled);
+        assert!(matches!(game.state, State::Leaderboard(0)));
+        scheduled.take_auto_advance();
+
+        // A pause outlasts the screen it was made on.
+        send_host(&mut game, host_id, IncomingHostMessage::AutoAdvance(false), &scheduled);
+        send_next(&mut game, host_id, &scheduled);
+        let State::Slide(current_slide) = &game.state else {
+            panic!("expected the second slide");
+        };
+        assert_eq!(current_slide.index, 1);
+        assert!(!matches!(
+            scheduled.take(),
+            Some((crate::AlarmMessage::AutoAdvance(_), _))
+        ));
+        assert!(!game.auto_advance_running);
+    }
+
+    #[test]
+    fn auto_advance_can_be_switched_on_mid_game() {
+        let scheduled = Scheduled::default();
+        let (mut game, host_id) = game_on_first_results(Options::default(), &scheduled);
+        assert!(scheduled.take().is_none());
+
+        send_host(&mut game, host_id, IncomingHostMessage::AutoAdvance(true), &scheduled);
+        let (alarm, delay) = scheduled.take_auto_advance();
+        assert_eq!(Some(delay), AutoAdvance::default().results);
+
+        fire(&mut game, &(alarm, delay), &scheduled);
+        assert!(matches!(game.state, State::Leaderboard(0)));
+        assert_eq!(
+            Some(scheduled.take_auto_advance().1),
+            AutoAdvance::default().leaderboard
+        );
+    }
+
+    #[test]
+    fn host_hears_the_countdown_and_the_switch() {
+        let scheduled = Scheduled::default();
+        let options = Options::default().with_auto_advance(auto_advance_delays());
+        let (mut game, host_id) = game_on_first_results(options, &scheduled);
+        scheduled.take_auto_advance();
+
+        let status = game.auto_advance_status();
+        assert!(status.running);
+        let next = status.next.expect("the results screen is counting down");
+        assert_eq!(next.screen, game.current_host_screen());
+        assert_eq!(next.delay, Duration::from_secs(5));
+        assert!(next.remaining <= next.delay);
+
+        let tunnel = MockTunnel::new();
+        let host_tunnel = |id: Id| (id == host_id).then(|| tunnel.clone());
+        game.receive_message(
+            host_id,
+            IncomingMessage::Host(IncomingHostMessage::AutoAdvance(false)),
+            scheduled.sink(),
+            Tick::default(),
+            host_tunnel,
+        );
+        let messages = tunnel.messages.lock().unwrap().clone();
+        assert_eq!(messages, [r#"{"Game":{"AutoAdvance":{"running":false,"next":null}}}"#]);
+        assert!(game.auto_advance_status().next.is_none());
+
+        // Back on, the countdown starts over and the host is told.
+        game.receive_message(
+            host_id,
+            IncomingMessage::Host(IncomingHostMessage::AutoAdvance(true)),
+            scheduled.sink(),
+            Tick::default(),
+            host_tunnel,
+        );
+        scheduled.take_auto_advance();
+        let messages = tunnel.messages.lock().unwrap().clone();
+        assert_eq!(messages.len(), 2);
+        assert!(messages[1].contains(r#""running":true"#) && messages[1].contains(r#""delay":5000"#));
+    }
+
+    #[test]
+    fn repeated_resume_keeps_the_pending_alarm() {
+        let scheduled = Scheduled::default();
+        let options = Options::default().with_auto_advance(auto_advance_delays());
+        let (mut game, host_id) = game_on_first_results(options, &scheduled);
+        let results_alarm = scheduled.take_auto_advance();
+
+        send_host(&mut game, host_id, IncomingHostMessage::AutoAdvance(true), &scheduled);
+        assert!(scheduled.take().is_none());
+        fire(&mut game, &results_alarm, &scheduled);
+        assert!(matches!(game.state, State::Leaderboard(0)));
+    }
+
+    #[test]
+    fn info_slide_auto_advances_only_without_a_duration_of_its_own() {
+        let fuiz: crate::fuiz::config::Fuiz = serde_json::from_str(
+            r#"{"title": "Info", "slides": [
+                {"InfoSlide": {"title": "Host-paced", "media": null}},
+                {"InfoSlide": {"title": "Timed", "media": null, "duration": 10000}}
+            ]}"#,
+        )
+        .unwrap();
+        let options = Options::default().with_auto_advance(auto_advance_delays());
+        let host_id = Id::new();
+        let mut game = Game::new(fuiz, options, host_id, &test_settings());
+        let scheduled = Scheduled::default();
+        send_next(&mut game, host_id, &scheduled);
+
+        let info_alarm = scheduled.take_auto_advance();
+        assert_eq!(info_alarm.1, Duration::from_secs(4));
+
+        fire(&mut game, &info_alarm, &scheduled);
+        assert!(matches!(&game.state, State::Slide(current_slide) if current_slide.index == 1));
+        let (own_alarm, delay) = scheduled.take().expect("the timed slide schedules its own alarm");
+        assert!(matches!(own_alarm, crate::AlarmMessage::InfoSlide(_)));
+        assert_eq!(delay, Duration::from_secs(10));
+    }
+
+    #[test]
+    fn auto_advance_options_parse_and_validate() {
+        let options: Options = serde_json::from_str(
+            r#"{"random_names": null, "show_answers": false, "no_leaderboard": false, "teams": null,
+                "auto_advance": {"results": 5000, "leaderboard": null}}"#,
+        )
+        .unwrap();
+        assert_eq!(options.auto_advance.results, Some(Duration::from_secs(5)));
+        assert_eq!(options.auto_advance.leaderboard, None);
+        // Missing fields fall back to the defaults, not to `None`.
+        assert_eq!(options.auto_advance.info_slide, AutoAdvance::default().info_slide);
+        assert!(!options.auto_advance.enabled);
+
+        let switched_on: Options = serde_json::from_str(
+            r#"{"random_names": null, "show_answers": false, "no_leaderboard": false, "teams": null,
+                "auto_advance": {"enabled": true}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            switched_on.auto_advance,
+            AutoAdvance {
+                enabled: true,
+                ..AutoAdvance::default()
+            }
+        );
+        assert!(options.validate_with(&test_settings()).is_ok());
+
+        let legacy: Options = serde_json::from_str(
+            r#"{"random_names": null, "show_answers": false, "no_leaderboard": false, "teams": null}"#,
+        )
+        .unwrap();
+        assert_eq!(legacy.auto_advance, AutoAdvance::default());
+
+        for out_of_bounds in [Duration::ZERO, Duration::from_secs(241)] {
+            let options = Options::default().with_auto_advance(AutoAdvance {
+                leaderboard: Some(out_of_bounds),
+                ..auto_advance_delays()
+            });
+            assert!(options.validate_with(&test_settings()).is_err());
+        }
     }
 }

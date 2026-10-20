@@ -301,6 +301,13 @@ impl SlideState {
         }
     }
 
+    /// Whether the slide is on its last phase, the one a "Next" leaves the
+    /// slide from.
+    pub(crate) fn in_last_phase(&self) -> bool {
+        use crate::fuiz::common::{Phase as _, SlideStateManager};
+        dispatch_slide!(self, s => s.state().next().is_none())
+    }
+
     /// Starts playing this slide and manages its lifecycle
     ///
     /// This method initiates the slide presentation, handles timing,
@@ -404,6 +411,31 @@ impl SlideState {
         dispatch_slide!(self, s => s.receive_message(
             watcher_id,
             message,
+            leaderboard,
+            watchers,
+            team_manager,
+            schedule_message,
+            tick,
+            tunnel_finder,
+            index,
+            count,
+        ))
+    }
+
+    /// Moves the slide along as the host's "Next" does: into its next phase,
+    /// or, from the last one, off the slide.
+    pub(crate) fn receive_host_next<F: TunnelFinder, S: ScheduleMessageFn>(
+        &mut self,
+        leaderboard: &mut Leaderboard,
+        watchers: &Watchers,
+        team_manager: Option<&TeamManager<crate::names::NameStyle>>,
+        schedule_message: S,
+        tick: Tick,
+        tunnel_finder: F,
+        index: usize,
+        count: usize,
+    ) -> SlideAction<S> {
+        dispatch_slide!(self, s => s.receive_host_next(
             leaderboard,
             watchers,
             team_manager,

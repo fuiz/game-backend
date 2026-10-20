@@ -267,6 +267,12 @@ impl State {
         );
     }
 
+    /// How long the slide stays up on its own, or `None` if it waits for the
+    /// host.
+    pub(crate) fn duration(&self) -> Option<Duration> {
+        self.config.duration
+    }
+
     /// Synchronization message for a newly connected watcher.
     pub fn state_message(&self, index: usize, count: usize) -> SyncMessage<'_> {
         SyncMessage::ContentAnnouncement {

@@ -690,6 +690,7 @@ pub(crate) trait QuestionReceiveMessage {
             crate::game::IncomingMessage::Host(
                 crate::game::IncomingHostMessage::Index(_)
                 | crate::game::IncomingHostMessage::Lock(_)
+                | crate::game::IncomingHostMessage::AutoAdvance(_)
                 | crate::game::IncomingHostMessage::Kick(_)
                 | crate::game::IncomingHostMessage::RequestResponses
                 | crate::game::IncomingHostMessage::RequestTeamRosters,

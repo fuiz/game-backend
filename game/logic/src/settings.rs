@@ -91,6 +91,10 @@ pub struct QuestionSettings {
     pub min_introduce_slide: u64,
     /// Maximum duration in seconds of the slide-announcement intro.
     pub max_introduce_slide: u64,
+    /// Minimum delay in seconds before a host-paced screen auto-advances.
+    pub min_auto_advance: u64,
+    /// Maximum delay in seconds before a host-paced screen auto-advances.
+    pub max_auto_advance: u64,
 }
 
 /// Multiple-choice-specific limits.
@@ -224,6 +228,8 @@ impl Default for QuestionSettings {
             max_introduce_question: 240,
             min_introduce_slide: 0,
             max_introduce_slide: 240,
+            min_auto_advance: 1,
+            max_auto_advance: 240,
         }
     }
 }
@@ -373,6 +379,19 @@ impl QuestionSettings {
         match val {
             None => Ok(()),
             Some(duration) => validate_duration_range(duration, self.min_introduce_slide, self.max_introduce_slide),
+        }
+    }
+
+    /// Validate that an auto-advance delay is within bounds. `None` (the
+    /// screen stays host-paced) is always valid.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`garde::Error`] if the duration is outside the configured bounds.
+    pub fn validate_auto_advance(&self, val: &Option<Duration>) -> garde::Result {
+        match val {
+            None => Ok(()),
+            Some(duration) => validate_duration_range(duration, self.min_auto_advance, self.max_auto_advance),
         }
     }
 }

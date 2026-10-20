@@ -111,6 +111,8 @@ pub enum AlarmMessage {
     Brainstorm(fuiz::brainstorm::AlarmMessage),
     /// Info slide alarms
     InfoSlide(fuiz::info_slide::AlarmMessage),
+    /// Advances a host-paced screen once its auto-advance delay runs out
+    AutoAdvance(game::AutoAdvanceAlarm),
 }
 
 #[cfg(test)]
