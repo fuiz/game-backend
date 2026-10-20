@@ -4332,8 +4332,8 @@ mod tests {
 
         // Test leaderboard_message function
         let leaderboard_msg = game.leaderboard_message();
-        assert!(leaderboard_msg.current.is_empty()); // No scores yet
-        assert!(leaderboard_msg.prior.is_empty());
+        assert_eq!(leaderboard_msg.current, [] as [(&str, u64); 0]); // No scores yet
+        assert_eq!(leaderboard_msg.prior, [] as [(&str, u64); 0]);
     }
 
     #[test]

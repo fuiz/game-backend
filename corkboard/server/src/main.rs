@@ -171,7 +171,7 @@ mod tests {
             let config: ServerConfig = server_figment().extract()?;
             assert_eq!(config.hostname, "0.0.0.0");
             assert_eq!(config.port, 5040);
-            assert!(config.allowed_origins.is_empty());
+            assert_eq!(config.allowed_origins, [] as [String; 0]);
             Ok(())
         });
     }

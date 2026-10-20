@@ -769,7 +769,7 @@ mod tests {
     fn points_span_the_configured_range() {
         assert_eq!(config(1, 5, Style::Agreement).points(), vec![1, 2, 3, 4, 5]);
         assert_eq!(config(0, 10, Style::Nps).points().len(), 11);
-        assert!(config(5, 1, Style::Agreement).points().is_empty());
+        assert_eq!(config(5, 1, Style::Agreement).points(), [] as [i64; 0]);
     }
 
     #[test]

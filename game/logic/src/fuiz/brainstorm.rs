@@ -969,15 +969,15 @@ mod tests {
     fn ideas_are_deduplicated_case_insensitively() {
         let mut state = config().to_state();
         assert_eq!(state.accept_ideas(vec!["Recycling".to_string()]), vec![0]);
-        assert!(state.accept_ideas(vec!["  recycling ".to_string()]).is_empty());
+        assert_eq!(state.accept_ideas(vec!["  recycling ".to_string()]), [] as [usize; 0]);
         assert_eq!(state.ideas, vec!["Recycling".to_string()]);
     }
 
     #[test]
     fn blank_ideas_are_ignored() {
         let mut state = config().to_state();
-        assert!(state.accept_ideas(vec!["   ".to_string()]).is_empty());
-        assert!(state.ideas.is_empty());
+        assert_eq!(state.accept_ideas(vec!["   ".to_string()]), [] as [usize; 0]);
+        assert_eq!(state.ideas, [] as [String; 0]);
     }
 
     #[test]

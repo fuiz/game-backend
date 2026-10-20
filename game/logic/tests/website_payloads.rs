@@ -382,7 +382,7 @@ fn a_rejoining_player_gets_a_sync_message_for_every_slide() {
         }
         let sync = game.state_message(player, ValueKind::Player, &finder);
         let json = serde_json::to_string(&sync).expect("sync serializes");
-        assert!(!json.is_empty());
+        assert_ne!(json, "");
         if let State::Slide(current) = &game.state {
             visited.push(current.index);
         }

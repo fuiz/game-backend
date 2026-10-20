@@ -1124,7 +1124,7 @@ mod tests {
         manager.finalize(&mut watchers, &mut names, Tick::default(), tunnel, Profanity::Censor);
 
         let team_ids = manager.all_ids();
-        assert!(!team_ids.is_empty());
+        assert_ne!(team_ids, [] as [watcher::Id; 0]);
 
         let team_sizes: Vec<usize> = team_ids
             .iter()
@@ -1189,7 +1189,7 @@ mod tests {
         manager.finalize(&mut watchers, &mut names, Tick::default(), tunnel, Profanity::Censor);
 
         let team_ids = manager.all_ids();
-        assert!(!team_ids.is_empty());
+        assert_ne!(team_ids, [] as [watcher::Id; 0]);
 
         let team_sizes: Vec<usize> = team_ids
             .iter()
@@ -1223,7 +1223,7 @@ mod tests {
         manager.finalize(&mut watchers, &mut names, Tick::default(), tunnel, Profanity::Censor);
 
         let team_ids = manager.all_ids();
-        assert!(!team_ids.is_empty());
+        assert_ne!(team_ids, [] as [watcher::Id; 0]);
 
         let team1 = manager.get_team(player1);
         let team2 = manager.get_team(player2);
@@ -1333,7 +1333,7 @@ mod tests {
 
             let result = TeamManager::<NameStyle>::consolidate_single_member_teams(teams);
 
-            assert!(result.is_empty());
+            assert_eq!(result, [] as [Vec<watcher::Id>; 0]);
         }
 
         #[test]
@@ -1368,7 +1368,7 @@ mod tests {
             let groups = manager.create_preference_groups(&players);
 
             assert_eq!(groups.len(), 1);
-            assert!(groups[0].is_empty());
+            assert_eq!(groups[0], [] as [watcher::Id; 0]);
         }
 
         #[test]
@@ -1601,7 +1601,7 @@ mod tests {
             let balanced = manager.balance_teams(&teams, 0);
 
             assert_eq!(balanced.len(), 1);
-            assert!(balanced[0].is_empty());
+            assert_eq!(balanced[0], [] as [watcher::Id; 0]);
         }
 
         #[test]
@@ -1632,7 +1632,7 @@ mod tests {
             let teams = vec![];
             let result = manager.create_team_id_names(teams, &mut names, Profanity::Censor);
 
-            assert!(result.is_empty());
+            assert_eq!(result, [] as [(watcher::Id, String, Vec<watcher::Id>); 0]);
         }
 
         #[test]
@@ -1646,7 +1646,7 @@ mod tests {
             let result = manager.create_team_id_names(teams, &mut names, Profanity::Censor);
 
             assert_eq!(result.len(), 1);
-            assert!(!result[0].1.is_empty());
+            assert_ne!(result[0].1, "");
             assert_eq!(result[0].2, vec![player1, player2]);
         }
 
@@ -1663,8 +1663,8 @@ mod tests {
             let result = manager.create_team_id_names(teams, &mut names, Profanity::Censor);
 
             assert_eq!(result.len(), 2);
-            assert!(!result[0].1.is_empty());
-            assert!(!result[1].1.is_empty());
+            assert_ne!(result[0].1, "");
+            assert_ne!(result[1].1, "");
             assert_ne!(result[0].0, result[1].0);
             assert_ne!(result[0].1, result[1].1);
             assert_eq!(result[0].2, vec![player1, player2]);
@@ -1685,7 +1685,7 @@ mod tests {
             assert_eq!(result.len(), 3);
 
             for (i, (team_id, team_name, players)) in result.iter().enumerate() {
-                assert!(!team_name.is_empty());
+                assert_ne!(team_name, "");
                 assert_eq!(players.len(), 1);
                 if i > 0 {
                     assert_ne!(*team_id, result[i - 1].0);
@@ -1726,7 +1726,7 @@ mod tests {
             let teams = vec![];
             let result = manager.assign_all_players_to_teams(&teams, &mut watchers);
 
-            assert!(result.is_empty());
+            assert_eq!(result, [] as [(watcher::Id, String); 0]);
             assert!(manager.player_to_team.is_empty());
             assert!(manager.team_to_players.is_empty());
         }
@@ -1906,7 +1906,7 @@ mod tests {
             assert_eq!(result[0], (team_id, team_name));
 
             let team_players = manager.team_to_players.get(&team_id).unwrap();
-            assert!(team_players.is_empty());
+            assert_eq!(team_players.as_slice(), []);
         }
     }
 

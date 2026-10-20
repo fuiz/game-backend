@@ -498,13 +498,13 @@ mod tests {
         // Test Roman style with 2 words (no praenomen)
         let style_2 = NameStyle::Roman(2);
         let name_2 = style_2.get_name(&mut fastrand::Rng::new());
-        assert!(!name_2.is_empty());
+        assert_ne!(name_2, "");
         assert!(name_2.chars().next().unwrap().is_uppercase());
 
         // Test Roman style with 3 words (with praenomen)
         let style_3 = NameStyle::Roman(3);
         let name_3 = style_3.get_name(&mut fastrand::Rng::new());
-        assert!(!name_3.is_empty());
+        assert_ne!(name_3, "");
         assert!(name_3.chars().next().unwrap().is_uppercase());
     }
 
@@ -513,14 +513,14 @@ mod tests {
         // Test Petname style with 2 words
         let style_2 = NameStyle::Petname(2);
         let name_2 = style_2.get_name(&mut fastrand::Rng::new());
-        assert!(!name_2.is_empty());
+        assert_ne!(name_2, "");
         // Should be title case after processing
         assert!(name_2.contains(' ')); // Should have multiple words
 
         // Test Petname style with 3 words
         let style_3 = NameStyle::Petname(3);
         let name_3 = style_3.get_name(&mut fastrand::Rng::new());
-        assert!(!name_3.is_empty());
+        assert_ne!(name_3, "");
         // Count spaces to verify word count (3 words = 2 spaces)
         assert_eq!(name_3.matches(' ').count(), 2);
     }
@@ -534,14 +534,14 @@ mod tests {
         let roman_name = NamingScheme::get_name(&roman_style, &mut fastrand::Rng::new());
         let petname_name = NamingScheme::get_name(&petname_style, &mut fastrand::Rng::new());
 
-        assert!(!roman_name.is_empty());
-        assert!(!petname_name.is_empty());
+        assert_ne!(roman_name, "");
+        assert_ne!(petname_name, "");
 
         // Test plural name generation
         let roman_plural = roman_style.get_plural_name(&mut fastrand::Rng::new());
         let petname_plural = petname_style.get_plural_name(&mut fastrand::Rng::new());
 
-        assert!(!roman_plural.is_empty());
-        assert!(!petname_plural.is_empty());
+        assert_ne!(roman_plural, "");
+        assert_ne!(petname_plural, "");
     }
 }
