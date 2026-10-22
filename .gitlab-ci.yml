@@ -13,58 +13,20 @@ cache:
 
 # Define stages
 stages:
-  - format
-  - check
-  - lint
-  - doc
-  - test
+  - verify
   - build
   - deploy
 
-# Before script to install necessary components
-before_script:
-  - rustc --version && cargo --version
-  - rustup component add rustfmt clippy
-
-# Format check
-format:
-  stage: format
+verify:
+  stage: verify
+  before_script:
+    - rustc --version && cargo --version
+    - rustup component add rustfmt clippy
   script:
     - cargo fmt --all -- --check
-  allow_failure: false
-
-# Cargo check
-check:
-  stage: check
-  script:
-    - cargo check --all-targets --all-features
-  allow_failure: false
-
-# Clippy linting
-clippy:
-  stage: lint
-  script:
     - cargo clippy --all-targets --all-features -- -D warnings
-  allow_failure: false
-
-# Documentation check
-doc:
-  stage: doc
-  script:
     - cargo doc --all --no-deps --document-private-items
-  allow_failure: false
-
-# Run tests
-test:
-  stage: test
-  script:
-    - cargo test --all-features --verbose
-  coverage: '/^\d+\.\d+% coverage/'
-  artifacts:
-    reports:
-      junit: test-results.xml
-    expire_in: 1 week
-  allow_failure: false
+    - cargo test --all-features
 
 .build-image:
   stage: build
