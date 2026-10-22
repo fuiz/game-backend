@@ -92,6 +92,9 @@ build-corkboard-server:
         unzip -q -o /tmp/bun.zip -d /tmp/bun
         install -D -m755 /tmp/bun/bun-linux-x64-baseline/bun "$BUN_INSTALL/bin/bun"
       fi
+      # The archive ships only `bun`; upstream's install script also links this.
+      # Outside the guard above, so a cache holding bun without it is repaired.
+      ln -sf bun "$BUN_INSTALL/bin/bunx"
     - worker-build --version 2>/dev/null | grep -Fqx "$WORKER_BUILD_VERSION" || cargo install worker-build --locked --version "$WORKER_BUILD_VERSION"
 
 deploy-fuiz-cloudflare:
