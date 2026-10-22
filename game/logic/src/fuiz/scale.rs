@@ -380,6 +380,10 @@ impl AnswerHandler<i64> for State {
         answer.to_string()
     }
 
+    fn question_text(&self) -> &str {
+        &self.config.title
+    }
+
     fn max_points(&self) -> u64 {
         self.config.points_awarded
     }

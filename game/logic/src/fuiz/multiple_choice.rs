@@ -363,11 +363,32 @@ impl AnswerHandler<Vec<usize>> for State {
             .iter()
             .map(|choice| match self.config.answers.get(*choice).map(|a| &a.content) {
                 Some(TextOrMedia::Text(text)) => text.clone(),
-                // An image option has no words of its own to quote.
+                // An image option speaks through its alt text when the host gave it any.
+                Some(TextOrMedia::Media(media)) if !media.alt().trim().is_empty() => media.alt().to_owned(),
                 Some(TextOrMedia::Media(_)) | None => format!("#{}", choice + 1),
             })
             .collect::<Vec<_>>()
             .join(", ")
+    }
+
+    fn question_text(&self) -> &str {
+        &self.config.title
+    }
+
+    fn is_graded(&self) -> bool {
+        true
+    }
+
+    fn describe_correct_answer(&self) -> Option<String> {
+        let correct = self
+            .config
+            .answers
+            .iter()
+            .enumerate()
+            .filter(|(_, answer)| answer.correct)
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        (!correct.is_empty()).then(|| self.describe_answer(&correct))
     }
 
     fn max_points(&self) -> u64 {

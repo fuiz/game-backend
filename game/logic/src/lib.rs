@@ -14,6 +14,7 @@ pub mod game;
 pub mod game_id;
 pub mod leaderboard;
 mod names;
+pub mod recap;
 pub mod session;
 pub mod teams;
 pub mod tick;

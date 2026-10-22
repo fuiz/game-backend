@@ -335,6 +335,10 @@ impl AnswerHandler<Vec<String>> for State {
         answer.join(", ")
     }
 
+    fn question_text(&self) -> &str {
+        &self.config.title
+    }
+
     fn max_points(&self) -> u64 {
         self.config.points_awarded
     }

@@ -269,6 +269,20 @@ fn clean_answer(answer: &str, case_sensitive: bool) -> String {
     }
 }
 
+impl State {
+    /// The accepted answers as the host wrote them, one per spelling the slide
+    /// tells apart: "Paris" and "paris" are one answer to a case-insensitive
+    /// slide, so it is shown once, in the host's first wording.
+    fn shown_answers(&self) -> Vec<&str> {
+        self.config
+            .answers
+            .iter()
+            .unique_by(|answer| clean_answer(answer, self.config.case_sensitive))
+            .map(String::as_str)
+            .collect_vec()
+    }
+}
+
 impl_slide_core!(State, Phase);
 
 impl AnswerHandler<String> for State {
@@ -292,6 +306,20 @@ impl AnswerHandler<String> for State {
         answer.clone()
     }
 
+    fn question_text(&self) -> &str {
+        &self.config.title
+    }
+
+    fn is_graded(&self) -> bool {
+        true
+    }
+
+    fn describe_correct_answer(&self) -> Option<String> {
+        // Every accepted spelling would read as a list of alternatives, so the
+        // first one the host wrote stands for them.
+        self.config.answers.first().cloned()
+    }
+
     fn max_points(&self) -> u64 {
         self.config.points_awarded
     }
@@ -308,7 +336,7 @@ impl AnswerHandler<String> for State {
         if self.change_state(Phase::Answers, Phase::AnswersResults) {
             watchers.announce(
                 &UpdateMessage::AnswersResults {
-                    answers: self.cleaned_answers.iter().map(String::as_str).collect_vec(),
+                    answers: self.shown_answers(),
                     results: self
                         .user_answers
                         .values()
@@ -531,7 +559,7 @@ impl State {
                 count,
                 question: &self.config.title,
                 media: self.config.media.as_ref(),
-                answers: self.cleaned_answers.iter().map(String::as_str).collect_vec(),
+                answers: self.shown_answers(),
                 results: self
                     .user_answers
                     .values()
@@ -608,5 +636,35 @@ impl QuestionReceiveMessage for State {
             self.record_answer_at(watcher_id, v, tick.now());
             self.handle_post_answer(watchers, &tunnel_finder);
         }
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::*;
+
+    fn state(answers: &[&str], case_sensitive: bool) -> State {
+        serde_json::from_value::<SlideConfig>(serde_json::json!({
+            "title": "Capital of France?",
+            "media": null,
+            "points_awarded": 1000,
+            "answers": answers,
+            "case_sensitive": case_sensitive,
+        }))
+        .expect("valid config")
+        .to_state()
+    }
+
+    #[test]
+    fn spellings_the_slide_treats_as_one_are_shown_once() {
+        let state = state(&["Paris", "paris", " Paris ", "Lutetia"], false);
+        assert_eq!(state.shown_answers(), vec!["Paris", "Lutetia"]);
+    }
+
+    #[test]
+    fn a_case_sensitive_slide_keeps_each_case() {
+        let state = state(&["Paris", "paris"], true);
+        assert_eq!(state.shown_answers(), vec!["Paris", "paris"]);
     }
 }

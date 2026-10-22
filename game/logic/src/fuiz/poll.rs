@@ -269,6 +269,10 @@ impl AnswerHandler<usize> for State {
         option_text(&self.config.answers, *answer)
     }
 
+    fn question_text(&self) -> &str {
+        &self.config.title
+    }
+
     fn max_points(&self) -> u64 {
         self.config.points_awarded
     }
@@ -596,7 +600,8 @@ impl QuestionReceiveMessage for State {
 fn option_text(answers: &[TextOrMedia], index: usize) -> String {
     match answers.get(index) {
         Some(TextOrMedia::Text(text)) => text.clone(),
-        // An image option has no words of its own to quote.
+        // An image option speaks through its alt text when the host gave it any.
+        Some(TextOrMedia::Media(media)) if !media.alt().trim().is_empty() => media.alt().to_owned(),
         Some(TextOrMedia::Media(_)) | None => format!("#{}", index + 1),
     }
 }

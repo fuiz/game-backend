@@ -419,9 +419,23 @@ impl AnswerHandler<Point> for State {
             .is_some_and(|area| area.contains(*answer))
     }
 
+    fn recap_answer(&self, _answer: &Point) -> Option<String> {
+        // Coordinates mean nothing without the picture under them.
+        None
+    }
+
     fn describe_answer(&self, answer: &Point) -> String {
         // A coordinate pair is the only honest way to name a spot on a picture.
         format!("{:.0}%, {:.0}%", answer.x * 100.0, answer.y * 100.0)
+    }
+
+    fn question_text(&self) -> &str {
+        &self.config.title
+    }
+
+    fn is_graded(&self) -> bool {
+        // A target makes a pin question; without one it is a drop pin, an opinion.
+        self.config.correct_area.is_some()
     }
 
     fn max_points(&self) -> u64 {
@@ -761,6 +775,12 @@ mod tests {
             radius_x: rx,
             radius_y: ry,
         }
+    }
+
+    #[test]
+    fn the_recap_does_not_quote_coordinates() {
+        let state = config(Some(ellipse(0.5, 0.5, 0.1, 0.1))).to_state();
+        assert_eq!(state.recap_answer(&Point { x: 0.61, y: 0.38 }), None);
     }
 
     fn config(correct_area: Option<Shape>) -> SlideConfig {

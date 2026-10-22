@@ -170,6 +170,10 @@ impl AnswerHandler<()> for State {
         String::new()
     }
 
+    fn question_text(&self) -> &str {
+        &self.config.title
+    }
+
     fn max_points(&self) -> u64 {
         0
     }

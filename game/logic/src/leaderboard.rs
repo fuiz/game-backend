@@ -331,6 +331,12 @@ impl Leaderboard {
             .map_or(vec![0; self.points_earned.len()], std::clone::Clone::clone)
     }
 
+    /// Points each entrant earned on the slide at `index`, empty for a slide
+    /// not yet scored.
+    pub fn round_points(&self, index: usize) -> &[(Id, u64)] {
+        self.points_earned.get(index).map_or(&[], Vec::as_slice)
+    }
+
     /// Gets the current score and position for a specific player
     ///
     /// Retrieves a player's current total score and their position in the

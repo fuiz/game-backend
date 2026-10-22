@@ -573,6 +573,16 @@ impl SlideState {
         dispatch_slide!(self, s => s.player_answers())
     }
 
+    /// This slide as the player's recap keeps it, or `None` for an info slide,
+    /// which asks nothing.
+    pub(crate) fn recap(&self, index: usize) -> Option<crate::recap::SlideRecap> {
+        use crate::fuiz::common::AnswerHandler;
+        match self {
+            Self::InfoSlide(_) => None,
+            other => Some(dispatch_slide!(other, s => s.recap(index))),
+        }
+    }
+
     /// Notify the active slide that a watcher has gone offline so it can
     /// keep its live-answered counter in sync.
     pub(crate) fn mark_watcher_left(&mut self, id: crate::watcher::Id) {

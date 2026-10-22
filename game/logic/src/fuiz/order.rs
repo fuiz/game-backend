@@ -303,6 +303,18 @@ impl AnswerHandler<Vec<String>> for State {
         answer.join(" → ")
     }
 
+    fn question_text(&self) -> &str {
+        &self.config.title
+    }
+
+    fn is_graded(&self) -> bool {
+        true
+    }
+
+    fn describe_correct_answer(&self) -> Option<String> {
+        Some(self.describe_answer(&self.config.answers))
+    }
+
     fn max_points(&self) -> u64 {
         self.config.points_awarded
     }

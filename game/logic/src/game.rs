@@ -28,6 +28,7 @@ use super::{
     fuiz::{config::Fuiz, multiple_choice},
     leaderboard::{HostSummary, Leaderboard, ScoreMessage},
     names::{self, Names, NamingScheme},
+    recap::{RecapEntry, SlideRecap},
     session::TunnelFinder,
     teams::{self, TeamManager},
     watcher::{self, Id, PlayerValue, ValueKind, Watchers},
@@ -264,6 +265,10 @@ pub struct Game {
     /// The most recently scheduled auto-advance, for the host's countdown.
     #[cfg_attr(feature = "serializable", serde(default))]
     auto_advance_pending: Option<PendingAutoAdvance>,
+    /// Every finished slide that asked something, in the order played, for
+    /// the players' recaps.
+    #[cfg_attr(feature = "serializable", serde(default))]
+    recap: Vec<SlideRecap>,
 }
 
 impl Debug for Game {
@@ -608,6 +613,8 @@ pub enum UpdateMessage<'a> {
         /// The removed name.
         name: &'a str,
     },
+    /// (PLAYER ONLY): the slide that just finished, for the player's recap.
+    RecapEntry(RecapEntry<'a>),
 }
 
 /// Sync messages sent to participants to synchronize their view with game state
@@ -658,6 +665,8 @@ pub enum SyncMessage<'a> {
         /// Names this player has already selected.
         selected: Vec<&'a str>,
     },
+    /// (PLAYER ONLY): every finished slide, for the player's recap.
+    Recap(Vec<RecapEntry<'a>>),
 }
 
 /// Summary information sent at the end of the game
@@ -774,6 +783,65 @@ impl Game {
             Some(team_manager) => team_manager.get_team(player_id).unwrap_or(player_id),
             None => player_id,
         }
+    }
+
+    /// One finished slide from `player`'s side.
+    ///
+    /// In a team game the team scores on its earliest answer, so every member
+    /// is shown that one, whoever gave it, and the verdict agrees with the
+    /// points.
+    fn recap_entry<'a>(&self, recap: &'a SlideRecap, player: Id, points: Option<u64>) -> RecapEntry<'a> {
+        let answerer = self
+            .team_manager
+            .as_ref()
+            .and_then(|team_manager| team_manager.team_members(player))
+            .and_then(|members| {
+                members
+                    .into_iter()
+                    .filter_map(|member| recap.answers.get(&member).map(|given| (given.answered_at, member)))
+                    .min()
+            })
+            .map_or(player, |(_, member)| member);
+        recap.entry_for(answerer, points)
+    }
+
+    /// Every finished slide from `player`'s side, for [`SyncMessage::Recap`].
+    fn recap_entries(&self, player: Id) -> Vec<RecapEntry<'_>> {
+        let leaderboard_id = self.leaderboard_id(player);
+        self.recap
+            .iter()
+            .map(|recap| {
+                let points = (!self.options.no_leaderboard).then(|| {
+                    self.leaderboard
+                        .round_points(recap.index)
+                        .iter()
+                        .find(|(id, _)| *id == leaderboard_id)
+                        .map_or(0, |(_, points)| *points)
+                });
+                self.recap_entry(recap, player, points)
+            })
+            .collect()
+    }
+
+    /// Sends every player their side of the slide that just finished.
+    fn announce_recap_entry<F: TunnelFinder>(&self, recap: &SlideRecap, tunnel_finder: F) {
+        let points: rustc_hash::FxHashMap<Id, u64> = if self.options.no_leaderboard {
+            rustc_hash::FxHashMap::default()
+        } else {
+            self.leaderboard.round_points(recap.index).iter().copied().collect()
+        };
+
+        self.watchers.announce_with(
+            |id, kind| match kind {
+                ValueKind::Player => {
+                    let points = (!self.options.no_leaderboard)
+                        .then(|| points.get(&self.leaderboard_id(id)).copied().unwrap_or(0));
+                    Some(UpdateMessage::RecapEntry(self.recap_entry(recap, id, points)).into())
+                }
+                ValueKind::Host | ValueKind::Unassigned => None,
+            },
+            tunnel_finder,
+        );
     }
 
     /// Every player's name for [`SyncMessage::WaitingScreen`], in join order.
@@ -929,6 +997,7 @@ impl Game {
             auto_advance_running: options.auto_advance.enabled,
             auto_advance_epoch: 0,
             auto_advance_pending: None,
+            recap: Vec::new(),
         }
     }
 
@@ -1024,6 +1093,12 @@ impl Game {
         tunnel_finder: F,
     ) {
         if let State::Slide(current_slide) = &self.state {
+            if let Some(mut recap) = current_slide.state.recap(current_slide.index) {
+                recap.number = self.recap.len() + 1;
+                self.announce_recap_entry(&recap, &tunnel_finder);
+                self.recap.push(recap);
+            }
+
             // Opinion and info slides score nothing, so a standings screen after
             // them would just repeat the previous one, so skip straight ahead.
             if self.options.no_leaderboard || !current_slide.state.awards_points() {
@@ -1286,6 +1361,14 @@ impl Game {
         Watchers::send_message(&UpdateMessage::NameAssign(name).into(), watcher, &tunnel_finder);
 
         self.update_player_with_options(watcher, &tunnel_finder);
+
+        // A player joining mid-game sees the slides they missed, the same as
+        // they would after a reconnect.
+        Watchers::send_state(
+            &SyncMessage::Recap(self.recap_entries(watcher)).into(),
+            watcher,
+            &tunnel_finder,
+        );
 
         if !name.is_empty() {
             // Announce to others of user joining
@@ -2037,6 +2120,11 @@ impl Game {
                     );
                 }
                 self.update_player_with_options(watcher_id, &tunnel_finder);
+                Watchers::send_state(
+                    &SyncMessage::Recap(self.recap_entries(watcher_id)).into(),
+                    watcher_id,
+                    &tunnel_finder,
+                );
                 Watchers::send_state(
                     &self.state_message(watcher_id, ValueKind::Player, &tunnel_finder),
                     watcher_id,
@@ -2839,6 +2927,97 @@ mod tests {
 
         // And a player who never answered is never listed.
         assert!(!responses.contains("Unknown"), "only real names: {responses}");
+    }
+
+    #[test]
+    fn finished_slides_reach_the_players_recap() {
+        let fuiz = create_test_fuiz();
+        let host_id = crate::watcher::Id::new();
+        let mut game = Game::new(fuiz, Options::default(), host_id, &test_settings());
+
+        let host_tunnel = MockTunnel::new();
+        let player_id = crate::watcher::Id::new();
+        let player_tunnel = MockTunnel::new();
+        let tunnel_finder = |id: crate::watcher::Id| {
+            if id == host_id {
+                Some(host_tunnel.clone())
+            } else if id == player_id {
+                Some(player_tunnel.clone())
+            } else {
+                None
+            }
+        };
+
+        game.watchers
+            .add_watcher(host_id, crate::watcher::Value::Host)
+            .expect("host joins");
+        game.watchers
+            .add_watcher(player_id, crate::watcher::Value::Unassigned)
+            .expect("player joins");
+        game.assign_player_name(player_id, "Ada", tunnel_finder)
+            .expect("name is free");
+
+        let schedule_message = |_: crate::AlarmMessage, _: std::time::Duration| {};
+        let next = |game: &mut Game| {
+            let screen = game.current_host_screen();
+            game.receive_message(
+                host_id,
+                IncomingMessage::Host(IncomingHostMessage::Next(screen)),
+                schedule_message,
+                Tick::default(),
+                tunnel_finder,
+            );
+        };
+
+        game.play(schedule_message, Tick::default(), tunnel_finder);
+        next(&mut game);
+        game.receive_message(
+            player_id,
+            IncomingMessage::Player(IncomingPlayerMessage::IndexAnswer(1)),
+            schedule_message,
+            Tick::default(),
+            tunnel_finder,
+        );
+
+        // Nothing reaches the recap while the slide is still on.
+        let has_entry = || {
+            player_tunnel
+                .messages
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|message| message.contains("RecapEntry"))
+        };
+        assert!(!has_entry());
+
+        while matches!(game.state, State::Slide(_)) {
+            next(&mut game);
+        }
+
+        let sent = player_tunnel.messages.lock().unwrap().clone();
+        let entry = sent
+            .iter()
+            .find(|message| message.contains("RecapEntry"))
+            .expect("the player is sent the finished slide");
+        assert!(entry.contains(r#""number":1"#), "{entry}");
+        assert!(entry.contains(r#""question":"Test Question""#), "{entry}");
+        assert!(entry.contains(r#""answer":"Wrong Answer""#), "{entry}");
+        assert!(entry.contains(r#""correct_answer":"Correct Answer""#), "{entry}");
+        assert!(entry.contains(r#""verdict":"Incorrect""#), "{entry}");
+        assert!(entry.contains(r#""points":0"#), "{entry}");
+
+        // A reconnecting player is sent the whole recap again.
+        player_tunnel.messages.lock().unwrap().clear();
+        assert!(matches!(
+            game.update_session(player_id, Tick::default(), tunnel_finder),
+            Reconnect::Reclaimed
+        ));
+        let sent = player_tunnel.messages.lock().unwrap().clone();
+        let recap = sent
+            .iter()
+            .find(|message| message.contains(r#""Recap":["#))
+            .expect("the reconnecting player is sent their recap");
+        assert!(recap.contains(r#""answer":"Wrong Answer""#), "{recap}");
     }
 
     /// Team options carry private fields, so build them the way a request does.

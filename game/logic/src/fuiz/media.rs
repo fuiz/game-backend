@@ -20,6 +20,16 @@ pub enum Media {
     Image(#[garde(dive)] Image),
 }
 
+impl Media {
+    /// The words that stand in for the media where it can't be shown, like a
+    /// player's recap. Empty when the host wrote none.
+    pub fn alt(&self) -> &str {
+        match self {
+            Self::Image(Image::Corkboard { alt, .. }) => alt,
+        }
+    }
+}
+
 /// Represents different types of image content
 ///
 /// This enum defines the various sources and types of images that can

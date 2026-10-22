@@ -18,6 +18,7 @@ use crate::tick::Tick;
 use crate::{
     fuiz::config::{ScheduleMessageFn, SlideAction},
     leaderboard::Leaderboard,
+    recap::{GivenAnswer, SlideRecap, Verdict},
     session::TunnelFinder,
     teams::TeamManager,
     time::Timestamp,
@@ -335,6 +336,63 @@ pub trait AnswerHandler<AnswerType>: HasSlideCore {
             .iter()
             .map(|(id, (answer, _))| (*id, self.describe_answer(answer)))
             .collect()
+    }
+
+    /// What the slide asks, for the player's recap.
+    fn question_text(&self) -> &str;
+
+    /// One answer as the player's recap shows it, or `None` when words would
+    /// mislead more than they tell.
+    fn recap_answer(&self, answer: &AnswerType) -> Option<String> {
+        Some(self.describe_answer(answer))
+    }
+
+    /// Whether answers on this slide are right or wrong. Opinion slides have
+    /// nothing to be right about.
+    fn is_graded(&self) -> bool {
+        false
+    }
+
+    /// The right answer as display text for the player's recap, or `None` when
+    /// the slide has no right answer that words can name.
+    fn describe_correct_answer(&self) -> Option<String> {
+        None
+    }
+
+    /// This slide as the recap keeps it once the slide is over. The game
+    /// numbers it, since only the game knows which slides came before.
+    fn recap(&self, index: usize) -> SlideRecap {
+        let graded = self.is_graded();
+        SlideRecap {
+            index,
+            number: 0,
+            question: self.question_text().to_owned(),
+            correct_answer: self.describe_correct_answer(),
+            graded,
+            answers: self
+                .user_answers()
+                .iter()
+                .map(|(id, (answer, answered_at))| {
+                    let verdict = if !graded {
+                        Verdict::Recorded
+                    } else if self.is_correct_answer(answer) {
+                        Verdict::Correct
+                    } else if self.score_multiplier(answer) > 0.0 {
+                        Verdict::Partial
+                    } else {
+                        Verdict::Incorrect
+                    };
+                    (
+                        *id,
+                        GivenAnswer {
+                            answer: self.recap_answer(answer),
+                            answered_at: *answered_at,
+                            verdict,
+                        },
+                    )
+                })
+                .collect(),
+        }
     }
 
     /// Returns a score multiplier for the given answer (0.0 to 1.0).
@@ -774,6 +832,9 @@ mod tests {
         }
         fn describe_answer(&self, answer: &bool) -> String {
             answer.to_string()
+        }
+        fn question_text(&self) -> &'static str {
+            "Mock question"
         }
         fn max_points(&self) -> u64 {
             self.max_points

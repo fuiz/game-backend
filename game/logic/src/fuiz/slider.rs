@@ -100,6 +100,14 @@ impl Range {
         }
     }
 
+    /// How many decimals a value on this range needs, taken from the step: a
+    /// slider of tenths reads "3.4", not "3.4000000000000004". Matches the
+    /// website's `formatSliderValue`.
+    fn decimals(&self) -> usize {
+        let step = self.step.to_string();
+        step.split_once('.').map_or(0, |(_, fraction)| fraction.len().min(6))
+    }
+
     /// Clamps `value` into the range and snaps it to the nearest grid point.
     ///
     /// Snapping means every recorded answer is one of the values the slider can
@@ -384,10 +392,28 @@ impl AnswerHandler<f64> for State {
     }
 
     fn describe_answer(&self, answer: &f64) -> String {
+        let value = format!("{answer:.*}", self.config.range.decimals());
         match self.config.unit.as_deref() {
-            Some(unit) => format!("{answer}{unit}"),
-            None => answer.to_string(),
+            Some(unit) => format!("{value}{unit}"),
+            None => value,
         }
+    }
+
+    fn question_text(&self) -> &str {
+        &self.config.title
+    }
+
+    fn is_graded(&self) -> bool {
+        true
+    }
+
+    fn describe_correct_answer(&self) -> Option<String> {
+        let correct = self.describe_answer(&self.config.correct);
+        Some(if self.config.tolerance > 0.0 {
+            format!("{correct} ± {}", self.describe_answer(&self.config.tolerance))
+        } else {
+            correct
+        })
     }
 
     fn max_points(&self) -> u64 {
@@ -766,6 +792,19 @@ mod tests {
             tolerance,
             unit: None,
         }
+    }
+
+    #[test]
+    fn answers_are_described_to_the_step_not_the_float() {
+        let range = Range {
+            min: 0.0,
+            max: 1.0,
+            step: 0.1,
+        };
+        let state = config(range, 0.5, 0.1).to_state();
+        // 0.1 * 3 is 0.30000000000000004 in floating point.
+        assert_eq!(state.describe_answer(&range.snap(0.3)), "0.3");
+        assert_eq!(state.describe_correct_answer().as_deref(), Some("0.5 ± 0.1"));
     }
 
     #[test]
