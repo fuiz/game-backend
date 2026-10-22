@@ -19,6 +19,7 @@ stages:
   - doc
   - test
   - build
+  - deploy
 
 # Before script to install necessary components
 before_script:
@@ -90,3 +91,91 @@ build-corkboard-server:
     - docker build --pull --target corkboard-server -t $CI_REGISTRY_IMAGE/corkboard-server:$CI_COMMIT_SHORT_SHA -t $CI_REGISTRY_IMAGE/corkboard-server:latest .
     - docker push $CI_REGISTRY_IMAGE/corkboard-server:$CI_COMMIT_SHORT_SHA
     - docker push $CI_REGISTRY_IMAGE/corkboard-server:latest
+
+# Cloudflare Workers deployment.
+#
+# Replaces Cloudflare's own Workers Builds, which does not cache Cargo and so
+# recompiled worker-build and every dependency on each deploy. Needs
+# CLOUDFLARE_API_TOKEN (Edit Workers template) and CLOUDFLARE_ACCOUNT_ID as
+# masked project variables.
+.deploy-worker:
+  stage: deploy
+  image: rust:latest
+  variables:
+    WORKER_BUILD_VERSION: "0.8.7"
+    WRANGLER_VERSION: "4.152.0"
+    BUN_VERSION: "1.4.4"
+    # Baseline build, so it does not require AVX2 from the runner. Checksum from
+    # the release's SHASUMS256.txt; update both together.
+    BUN_SHA256: "e0446eb55995772eb9894bebae9a6be368d985a8b9271ee124486f9946eedd76"
+    XDG_CACHE_HOME: $CI_PROJECT_DIR/.cache
+    BUN_INSTALL: $CI_PROJECT_DIR/.cache/bun
+  # Per-job key. Both deploy jobs can run in the same stage, and a shared key
+  # lets whichever finishes last overwrite the other's target directory. It also
+  # keeps the wasm target out of the one the check/clippy/test jobs share.
+  cache:
+    key: ${CI_COMMIT_REF_SLUG}-${CI_JOB_NAME_SLUG}
+    paths:
+      - cargo/
+      - target/
+      - .cache/
+  before_script:
+    - export PATH="$CARGO_HOME/bin:$BUN_INSTALL/bin:$PATH"
+    - rustup target add wasm32-unknown-unknown
+    - |
+      if ! bun --version 2>/dev/null | grep -Fqx "$BUN_VERSION"; then
+        command -v unzip > /dev/null || { apt-get update && apt-get install -y --no-install-recommends unzip; }
+        curl -fsSL -o /tmp/bun.zip "https://github.com/oven-sh/bun/releases/download/bun-v$BUN_VERSION/bun-linux-x64-baseline.zip"
+        echo "$BUN_SHA256  /tmp/bun.zip" | sha256sum -c -
+        unzip -q -o /tmp/bun.zip -d /tmp/bun
+        install -D -m755 /tmp/bun/bun-linux-x64-baseline/bun "$BUN_INSTALL/bin/bun"
+      fi
+    - worker-build --version 2>/dev/null | grep -Fqx "$WORKER_BUILD_VERSION" || cargo install worker-build --locked --version "$WORKER_BUILD_VERSION"
+
+deploy-fuiz-cloudflare:
+  extends: .deploy-worker
+  script:
+    - cd game/cloudflare
+    - bunx wrangler@$WRANGLER_VERSION deploy
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      changes:
+        - .gitlab-ci.yml
+        - Cargo.toml
+        - Cargo.lock
+        - game/logic/**/*
+        - game/cloudflare/src/**/*
+        - game/cloudflare/Cargo.toml
+        - game/cloudflare/wrangler.toml
+
+deploy-corkboard-cloudflare:
+  extends: .deploy-worker
+  script:
+    - cd corkboard/cloudflare
+    - bunx wrangler@$WRANGLER_VERSION deploy
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      changes:
+        - .gitlab-ci.yml
+        - Cargo.toml
+        - Cargo.lock
+        - corkboard/logic/**/*
+        - corkboard/cloudflare/src/**/*
+        - corkboard/cloudflare/Cargo.toml
+        - corkboard/cloudflare/wrangler.toml
+
+# TypeScript worker that fuiz-cloudflare binds to as COUNTER.
+deploy-counter:
+  stage: deploy
+  image: oven/bun:latest
+  cache: []
+  before_script: []
+  script:
+    - cd game/cloudflare/counter
+    - bun install --frozen-lockfile
+    - bunx wrangler deploy
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      changes:
+        - .gitlab-ci.yml
+        - game/cloudflare/counter/**/*

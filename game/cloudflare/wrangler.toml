@@ -10,7 +10,7 @@ routes = [
 ]
 
 [build]
-command = "cargo install -q worker-build && worker-build --release"
+command = "worker-build --release"
 
 [durable_objects]
 bindings = [

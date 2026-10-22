@@ -15,6 +15,15 @@ Uses two [Durable Objects](https://developers.cloudflare.com/durable-objects/):
 
 An image server is also required; see [`corkboard/cloudflare`](../../corkboard/cloudflare/).
 
+## Prerequisites
+
+`wrangler dev` and `wrangler deploy` both run `worker-build`, so install it first:
+
+```bash
+cargo install worker-build --locked --version 0.8.7
+rustup target add wasm32-unknown-unknown
+```
+
 ## Development
 
 ```bash
