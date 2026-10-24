@@ -49,6 +49,8 @@ async fn get_full(data: web::Data<AppState>, path: web::Path<MediaId>) -> impl R
     match data.storage.retrieve(path.into_inner()).await {
         Some((bytes, content_type)) => Ok(HttpResponse::build(StatusCode::OK)
             .content_type(content_type)
+            // stored bytes come from users, so browsers must not treat them as anything but an image
+            .insert_header(("x-content-type-options", "nosniff"))
             .body(bytes)),
         None => Err(ErrorNotFound("This file was not found")),
     }
@@ -64,24 +66,29 @@ struct ImageUpload {
 enum ImageDecodingError {
     #[error("type is not recognizable")]
     NotRecognizable(#[from] std::io::Error),
-    #[error("image decoding error")]
-    ImageError(#[from] corkboard::ImageDecodingError),
-    #[error("encoding error")]
-    EncodingError(#[from] corkboard::PngEncodingError),
+    #[error("{0}")]
+    StorageError(#[from] corkboard::StorageError),
 }
 
-impl actix_web::error::ResponseError for ImageDecodingError {}
+impl actix_web::error::ResponseError for ImageDecodingError {
+    fn status_code(&self) -> StatusCode {
+        match self {
+            Self::NotRecognizable(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::StorageError(e) => StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+        }
+    }
+}
 
 #[post("/thumbnail")]
 async fn thumbnail(image_upload: MultipartForm<ImageUpload>) -> impl Responder {
     let ImageUpload { image } = image_upload.into_inner();
 
-    let thumbnail_bytes = corkboard::generate_thumbnail(&image.data)?;
+    let thumbnail = corkboard::generate_thumbnail(&image.data)?;
 
     Ok::<HttpResponse, ImageDecodingError>(
         HttpResponse::build(StatusCode::OK)
-            .content_type("image/png")
-            .body(thumbnail_bytes),
+            .content_type(thumbnail.content_type)
+            .body(thumbnail.bytes),
     )
 }
 
@@ -89,11 +96,8 @@ async fn thumbnail(image_upload: MultipartForm<ImageUpload>) -> impl Responder {
 async fn upload(data: web::Data<AppState>, image_upload: MultipartForm<ImageUpload>) -> impl Responder {
     let ImageUpload { image } = image_upload.into_inner();
 
-    let (bytes, content_type) = {
-        let frames = corkboard::read_image_as_frames(&image.data)?;
-        let bytes = corkboard::encode_frames_as_png(frames)?;
-        (bytes, mime::IMAGE_PNG)
-    };
+    let corkboard::StoredImage { bytes, content_type } = corkboard::prepare_for_storage(Vec::from(image.data))?;
+    let content_type = content_type.parse().unwrap_or(mime::IMAGE_PNG);
 
     let media_id = MediaId::new();
     data.storage

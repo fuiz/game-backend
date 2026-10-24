@@ -6,6 +6,9 @@ use worker::*;
 
 const IMAGE_EXPIRATION: std::time::Duration = std::time::Duration::from_hours(24);
 
+/// Largest value Workers KV stores.
+const MAX_KV_VALUE_BYTES: usize = 25 * 1024 * 1024;
+
 /// Handles incoming fetch events.
 ///
 /// # Errors
@@ -26,14 +29,15 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Respo
                 FormEntry::Field(_) => return Response::error("image has to be a file", 400),
             };
 
-            let Ok(thumbnail_bytes) = corkboard::generate_thumbnail(&data) else {
-                return Response::error("failed to generate thumbnail", 500);
+            let thumbnail = match corkboard::generate_thumbnail(&data) {
+                Ok(thumbnail) => thumbnail,
+                Err(e) => return Response::error(format!("failed to generate thumbnail: {e}"), e.status_code()),
             };
 
             Ok(
-                Response::from_body(worker::ResponseBody::Body(thumbnail_bytes))?.with_headers({
+                Response::from_body(worker::ResponseBody::Body(thumbnail.bytes))?.with_headers({
                     let headers = Headers::new();
-                    headers.append("content-type", "image/png")?;
+                    headers.append("content-type", thumbnail.content_type)?;
                     headers
                 }),
             )
@@ -48,19 +52,14 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Respo
                 FormEntry::Field(_) => return Response::error("image has to be a file", 400),
             };
 
-            let frames = match corkboard::read_image_as_frames(&data) {
-                Ok(frames) => frames,
-                Err(e) => {
-                    return Response::error(
-                        format!("Failed to decode image format, please use a supported format. Internal error: {e}"),
-                        400,
-                    );
-                }
+            let image = match corkboard::prepare_for_storage(data) {
+                Ok(image) => image,
+                Err(e) => return Response::error(e.to_string(), e.status_code()),
             };
 
-            let Ok(bytes) = corkboard::encode_frames_as_png(frames) else {
-                return Response::error("failed to encode image", 500);
-            };
+            if image.bytes.len() > MAX_KV_VALUE_BYTES {
+                return Response::error("image is larger than 25 MiB", 413);
+            }
 
             let kv = ctx.kv("IMAGES")?;
 
@@ -72,8 +71,8 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Respo
                 return Response::error("couldn't convert hash to hex", 500);
             };
 
-            kv.put_bytes(&key, &bytes)?
-                .metadata("image/png")?
+            kv.put_bytes(&key, &image.bytes)?
+                .metadata(image.content_type)?
                 .expiration_ttl(IMAGE_EXPIRATION.as_secs())
                 .execute()
                 .await?;
@@ -90,10 +89,14 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Respo
             let (bytes, content_type) = kv.get(media_id).bytes_with_metadata().await?;
 
             Ok(Response::from_bytes(bytes.unwrap_or_default())?.with_headers({
-                Headers::from_iter([(
-                    "content-type".to_string(),
-                    content_type.unwrap_or("image/png".to_string()),
-                )])
+                Headers::from_iter([
+                    (
+                        "content-type".to_string(),
+                        content_type.unwrap_or("image/png".to_string()),
+                    ),
+                    // stored bytes come from users, so browsers must not treat them as anything but an image
+                    ("x-content-type-options".to_string(), "nosniff".to_string()),
+                ])
             }))
         })
         .run(req, env)

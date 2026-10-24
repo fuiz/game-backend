@@ -20,13 +20,15 @@ POST /upload
 
 Accepts a multipart form with an `image` field. Returns a `MediaID`. Images expire after an hour (server) or 24 hours (cloudflare).
 
+JPEG, PNG, GIF, WebP and still AVIF images are stored in their own format with all metadata removed except the color profile and orientation. HEIC, JPEG XL and animated AVIF images are rejected with `415`, since only Safari displays them. Other formats are converted to PNG. Images over 50 million pixels are rejected.
+
 ### Retrieve
 
 ```http
 GET /get/{media_id}
 ```
 
-Returns the image as `image/png`.
+Returns the image with the content type it was stored with.
 
 ### Compute Thumbnail
 
@@ -34,4 +36,4 @@ Returns the image as `image/png`.
 POST /thumbnail
 ```
 
-Accepts a multipart form with an `image` field. Returns a thumbnail as `image/png`.
+Accepts a multipart form with an `image` field. Returns a thumbnail as `image/png`. Still AVIF images up to 1 MiB, which can't be decoded, are returned as `image/avif` with their metadata removed.
